@@ -56,7 +56,7 @@ pub struct Matrix {
     pub data: Vec<f64>, // Flat vector for matrix elements
 }
 
-//IMplementation of a matrix specialized for a neural network
+//Implementation of a matrix specialized for a neural network
 impl Matrix {
     // Constructor for a new matrix
     pub fn new(rows: usize, cols: usize, data: Vec<f64>) -> Self {
@@ -102,7 +102,7 @@ impl Matrix {
         Self { rows, cols, data }
     }
 
-    // initialize_weights - neural network specific function for setting weights for the layers
+    // Initialize_weights - neural network specific function for setting weights for the layers
     pub fn initialize_weights(&mut self, nodes_in_previous_layer: usize) {
         let std_dev = (nodes_in_previous_layer as f64).powf(-0.5); // Calculate standard deviation
         let normal = Normal::new(0.0, std_dev).unwrap(); // Normal distribution with mean 0 and std_dev
@@ -131,7 +131,7 @@ impl Matrix {
         &mut self.data[row * self.cols + col]
     }
 
-    // transpose - flip rows and cols
+    // Transpose - flip rows and cols
     pub fn transpose(&self) -> Self {
         let mut transposed = Matrix::zeros(self.cols, self.rows); // Swap rows and cols
 
@@ -145,7 +145,8 @@ impl Matrix {
         transposed
     }
 
-    // extract - copy a row or col from the matrix
+    // Copy a row or col from the matrix
+    // TODO: this is poorly named
     pub fn extract(&self) -> Result<Vec<f64>, String> {
         if self.rows == 1 {
             // Row vector: return all elements
@@ -159,6 +160,7 @@ impl Matrix {
         }
     }
 
+    // Returns a slice for the row specified by row_index
     pub fn row_slice(&self, row_index: usize) -> Result<&[f64], String> {
         if row_index >= self.rows {
             return Err("Row index out of bounds.".to_string());
@@ -170,6 +172,7 @@ impl Matrix {
         Ok(&self.data[start..end]) // Return a slice for the row
     }
 
+    // Creates a Matrix from a Vec<64>
     pub fn from_vector(vec: Vec<f64>, orientation: VectorType) -> Self {
         match orientation {
             VectorType::Column => {
@@ -193,6 +196,7 @@ impl Matrix {
         }
     }
 
+    // Return the index of the maximum value in the data
     pub fn argmax(&self) -> usize {
         // Ensure the matrix is a column vector (1D vector)
         if self.rows != 1 && self.cols != 1 {
@@ -208,13 +212,117 @@ impl Matrix {
             .expect("Matrix is empty, cannot compute argmax.")
     }
 
-    //apply the funcion to the data
+
+    // The attention mechanism involves scaling the dot product of queries (Q) and keys (K) 
+    // by the square root of the dimensionality of the keys √dk) to stabilize gradients.
+    pub fn scale(&self, scalar: f64) -> Matrix {
+        let scaled_data: Vec<f64> = self.data.iter().map(|&x| x / scalar).collect();
+        Matrix::new(self.rows, self.cols, scaled_data)
+    }
+
+    // Masked self-attention prevents a token from attending to future tokens during training. 
+    // This is done by applying a mask that sets certain positions in the attention scores to -∞,
+    //  before applying the softmax function.
+    pub fn mask(&self, mask: &Matrix, masked_value: f64) -> Matrix {
+        assert_eq!(self.rows, mask.rows, "Mask and matrix rows must match");
+        assert_eq!(self.cols, mask.cols, "Mask and matrix cols must match");
+
+        let masked_data: Vec<f64> = self
+            .data
+            .iter()
+            .zip(mask.data.iter())
+            .map(|(&x, &m)| if m == 1.0 { x } else { masked_value })
+            .collect();
+
+        Matrix::new(self.rows, self.cols, masked_data)
+    }
+    
+
+    pub fn upper_triangular_mask(size: usize) -> Matrix {
+        let mut mask_data = vec![0.0; size * size];
+        for i in 0..size {
+            for j in 0..size {
+                if j > i {
+                    mask_data[i * size + j] = f64::NEG_INFINITY;
+                } else {
+                    mask_data[i * size + j] = 1.0;
+                }
+            }
+        }
+        Matrix::new(size, size, mask_data)
+    }
+
+    // Attention scores require softmax to be applied row-wise.
+    pub fn softmax_rows(&self) -> Matrix {
+        let epsilon = 1e-9; // Small value for numerical stability
+        let mut data = Vec::with_capacity(self.data.len());
+
+        for i in 0..self.rows {
+            let row_start = i * self.cols;
+            let row_end = row_start + self.cols;
+
+            let row = &self.data[row_start..row_end];
+            let max_row = row.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+
+            let exp_row: Vec<f64> = row.iter().map(|&x| (x - max_row).exp()).collect();
+            let sum_exp = exp_row.iter().sum::<f64>();
+
+            if sum_exp.abs() < epsilon {
+                // Handle zero or near-zero sum by normalizing to a uniform distribution
+                data.extend(row.iter().map(|_| 1.0 / self.cols as f64));
+                eprintln!("Warning: Softmax encountered a zero or near-zero sum.");
+            } else {
+                // Perform regular softmax normalization
+                data.extend(exp_row.iter().map(|&x| x / sum_exp));
+            }
+        }
+
+        Matrix::new(self.rows, self.cols, data)
+    }
+
+    //  Generate random Q, K, and V matrices for attention layers.
+    pub fn random_with_shape(rows: usize, cols: usize) -> Self {
+        Self::random(rows, cols)
+    }
+
+    // Add a row vector to every row of the Matrix
+    pub fn add_broadcast(&self, vec: &Matrix) -> Matrix {
+        assert_eq!(vec.rows, 1, "Vector must have one row for broadcasting.");
+        assert_eq!(self.cols, vec.cols, "Vector and matrix columns must match.");
+
+        let mut result = self.clone();
+        for i in 0..self.rows {
+            for j in 0..self.cols {
+                result.data[i * self.cols + j] += vec.data[j];
+            }
+        }
+        result
+    }
+
+    // Clip values in a matrix to a specified range (to avoid issues with exploding or vanishing gradients)
+    pub fn clip(&self, min: f64, max: f64) -> Matrix {
+        let clipped_data: Vec<f64> = self.data.iter().map(|&x| x.min(max).max(min)).collect();
+        Matrix::new(self.rows, self.cols, clipped_data)
+    }
+
+    // Apply the funcion to the data
     pub fn apply<F>(&self, func: F) -> Matrix
     where
         F: Fn(f64) -> f64,
     {
         let data: Vec<f64> = self.data.iter().map(|&x| func(x)).collect();
         Matrix::new(self.rows, self.cols, data)
+    }
+
+    // Print the matrices in a readable format
+    pub fn pretty_print(&self) {
+        for i in 0..self.rows {
+            let row: Vec<_> = self.data[i * self.cols..(i + 1) * self.cols]
+                .iter()
+                .map(|x| format!("{:8.4}", x))
+                .collect();
+            println!("[{}]", row.join(", "));
+        }
     }
 
 }
@@ -315,6 +423,9 @@ impl MulAssign<f64> for Matrix {
 }
 
 // Implement dot product for Matrix
+// This currently uses a triple loop for matrix multiplication, which works but isn’t optimal for larger matrices. 
+// You might explore using a crate like 'nalgebra' or 
+// optimize the implementation with SIMD (Single Instruction, Multiple Data) for faster execution
 impl Dot for Matrix {
     type Output = Matrix;
 
