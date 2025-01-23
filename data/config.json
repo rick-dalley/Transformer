@@ -11,6 +11,10 @@
   "learning_rate": 0.3,
   "shuffle_data": true,
   "validation_split": 0.1,
+  "number_heads": 8,
+  "number_layers": 6,
+  "model_dimensions": 512,
+  "hidden_dimensions": 2048,
   "activation_functions": {
     "hidden_layer": "sigmoid",
     "output_layer": "sigmoid"
