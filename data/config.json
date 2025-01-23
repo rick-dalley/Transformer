@@ -1,13 +1,21 @@
 {
   "data_file": "/Users/richarddalley/Code/Rust/NeuralNetworkRust/data/all_stocks_5yr.csv",
-  "label_column": 0,
+  "label_column": "close",
+  "columns": {
+    "features": ["open", "high", "low", "close", "volume"],
+    "target": "close",
+    "time_column": "date",
+    "categorical_column": "Name"
+  },
+  "sequence_length": 30,
   "epochs": 5,
   "batch_size": 32,
   "learning_rate": 0.3,
-  "shuffle_data": true,
   "validation_split": 0.1,
   "number_heads": 8,
   "number_layers": 6,
   "model_dimensions": 512,
-  "hidden_dimensions": 2048
+  "hidden_dimensions": 2048,
+  "categorical_handling": "embedding",
+  "data_format": "time_series"
 }
