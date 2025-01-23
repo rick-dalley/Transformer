@@ -1,22 +1,13 @@
 {
-  "data_file": "/Users/richarddalley/Code/Rust/NeuralNetworkRust/data/mnist_train.csv",
+  "data_file": "/Users/richarddalley/Code/Rust/NeuralNetworkRust/data/all_stocks_5yr.csv",
   "label_column": 0,
-  "input_nodes": 784,
-  "hidden_nodes": 100,
-  "scaling_factor": 255.0,
   "epochs": 5,
-  "data_rows": 60000,
   "batch_size": 32,
-  "output_classes": 10,
   "learning_rate": 0.3,
   "shuffle_data": true,
   "validation_split": 0.1,
   "number_heads": 8,
   "number_layers": 6,
   "model_dimensions": 512,
-  "hidden_dimensions": 2048,
-  "activation_functions": {
-    "hidden_layer": "sigmoid",
-    "output_layer": "sigmoid"
-  }
+  "hidden_dimensions": 2048
 }
