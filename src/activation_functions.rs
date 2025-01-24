@@ -8,6 +8,9 @@ pub enum ActivationFunction {
     Tanh,
     Softmax, // Typically applied to vectors, not scalars
     Swish,
+    LeakyReLUDerivative,
+    ELUDerivative,
+    ReLUDerivative,
 }
 
 impl fmt::Display for ActivationFunction {
@@ -19,6 +22,9 @@ impl fmt::Display for ActivationFunction {
             ActivationFunction::Tanh => write!(f, "Tanh"),
             ActivationFunction::Softmax => write!(f, "Softmax"),
             ActivationFunction::Swish => write!(f, "Swish"),
+            ActivationFunction::LeakyReLUDerivative => write!(f, "Leaky ReLU Derivative"),
+            ActivationFunction::ELUDerivative => write!(f, "ELU Derivative"),
+            ActivationFunction::ReLUDerivative => write!(f, "ReLU Derivative"),
         }
     }
 }
@@ -31,6 +37,8 @@ pub fn get_activation_function(name: &str, alpha: Option<f64>) -> ActivationFunc
         "tanh" => ActivationFunction::Tanh,
         "softmax" => ActivationFunction::Softmax,
         "swish" => ActivationFunction::Swish,
+        "leaky_relu_derivative" =>ActivationFunction::LeakyReLUDerivative,
+        "elu_drevivative" =>ActivationFunction::ELUDerivative,
         _ => panic!("Unknown activation function: {}", name),
     }
 }
@@ -70,6 +78,16 @@ pub fn elu(x: f64, alpha: f64) -> f64 {
 }
 
 #[allow(unused)] 
+pub fn leaky_relu_derivative(x: f64, alpha: f64) -> f64 {
+    if x > 0.0 { 1.0 } else { alpha }
+}
+
+#[allow(unused)] 
+pub fn elu_derivative(x: f64, alpha: f64) -> f64 {
+    if x > 0.0 { 1.0 } else { alpha * x.exp() }
+}
+
+#[allow(unused)] 
 pub fn softmax(input: &[f64]) -> Vec<f64> {
     let max_input = input.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     let exp_values: Vec<f64> = input.iter().map(|&x| (x - max_input).exp()).collect();
@@ -80,4 +98,12 @@ pub fn softmax(input: &[f64]) -> Vec<f64> {
 #[allow(unused)] 
 pub fn tanh(x: f64) -> f64 {
     x.tanh()
+}
+#[allow(unused)] 
+pub fn relu_derivative(x: f64) -> f64 {
+    if x > 0.0 {
+        1.0
+    } else {
+        0.0
+    }
 }

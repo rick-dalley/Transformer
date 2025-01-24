@@ -20,6 +20,7 @@
 // traits
 use std::ops::Mul;
 use std::ops::MulAssign;
+use std::ops::Div;
 use std::ops::Add;
 use std::ops::AddAssign;
 use std::ops::Sub;
@@ -40,14 +41,6 @@ pub trait Outer<Rhs = Self> {
     fn outer(&self, rhs: &Rhs) -> Self::Output;
 }
 
-
-// enums
-pub enum VectorType {
-    Row,
-    Column,
-}
-
-
 //Matrix
 #[derive(Debug, Clone)]
 pub struct Matrix {
@@ -64,20 +57,14 @@ impl Matrix {
         Self { rows, cols, data }
     }
 
-    pub fn new_from_vector(vec: Vec<f64>, vector_type: VectorType) -> Self {
-        match vector_type {
-            VectorType::Column => Self {
-                rows: vec.len(),
-                cols: 1,
-                data: vec,
-            },
-            VectorType::Row => Self {
-                rows: 1,
-                cols: vec.len(),
-                data: vec,
-            },
-        }
+    pub fn rows_iter(&self) -> impl Iterator<Item = &[f64]> {
+        (0..self.rows).map(move |row| {
+            let start = row * self.cols;
+            let end = start + self.cols;
+            &self.data[start..end]
+        })
     }
+
 
     // Zero-initialized matrix
     pub fn zeros(rows: usize, cols: usize) -> Self {
@@ -123,6 +110,16 @@ impl Matrix {
         &self.data[row * self.cols + col]
     }
 
+    pub fn argmax_row(slice: &[f64]) -> usize {
+        slice
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .map(|(index, _)| index)
+            .expect("Slice is empty")
+    }
+
+
     // Mutable access to matrix elements
     pub fn at_mut(&mut self, row: usize, col: usize) -> &mut f64 {
         if row >= self.rows || col >= self.cols {
@@ -133,6 +130,7 @@ impl Matrix {
 
     // Transpose - flip rows and cols
     pub fn transpose(&self) -> Self {
+
         let mut transposed = Matrix::zeros(self.cols, self.rows); // Swap rows and cols
 
         for i in 0..self.rows {
@@ -172,28 +170,72 @@ impl Matrix {
         Ok(&self.data[start..end]) // Return a slice for the row
     }
 
-    // Creates a Matrix from a Vec<64>
-    pub fn from_vector(vec: Vec<f64>, orientation: VectorType) -> Self {
-        match orientation {
-            VectorType::Column => {
-                let rows = vec.len();
-                let cols = 1;
-                Matrix {
-                    rows,
-                    cols,
-                    data: vec,
-                }
-            }
-            VectorType::Row => {
-                let rows = 1;
-                let cols = vec.len();
-                Matrix {
-                    rows,
-                    cols,
-                    data: vec,
-                }
-            }
+    /// Creates a row matrix (1 row, `vec.len()` columns)
+    pub fn from_row(vec: Vec<f64>) -> Self {
+        Self {
+            rows: 1,
+            cols: vec.len(),
+            data: vec,
         }
+    }
+
+    /// Creates a one-hot encoded matrix from a set of labels.
+    ///
+    /// # Arguments
+    /// - `labels`: A slice of label indices (e.g., `[0, 2, 1]`).
+    /// - `num_classes`: The total number of classes.
+    ///
+    /// # Returns
+    /// A matrix with dimensions `(labels.len(), num_classes)` where each row is
+    /// a one-hot vector representing the corresponding label.
+    pub fn from_labels(labels: &[usize], num_classes: usize) -> Self {
+        let rows = labels.len();
+        let cols = num_classes;
+        let mut data = vec![0.0; rows * cols];
+
+        for (i, &label) in labels.iter().enumerate() {
+            assert!(label < num_classes, "Label index out of bounds");
+            data[i * cols + label] = 1.0;
+        }
+
+        Matrix {
+            rows,
+            cols,
+            data,
+        }
+    }
+
+    /// Creates a column matrix (`vec.len()` rows, 1 column)
+    pub fn from_col(vec: Vec<f64>) -> Self {
+        Self {
+            rows: vec.len(),
+            cols: 1,
+            data: vec,
+        }
+    }
+
+    pub fn column_to_indices(&self, column_index: usize) -> Vec<usize> {
+        assert!(
+            column_index < self.cols,
+            "Column index out of bounds. The matrix has {} columns.",
+            self.cols
+        );
+
+        self.data
+            .chunks(self.cols) // Iterate over rows
+            .map(|row| row[column_index] as usize) // Extract the specified column and cast to usize
+            .collect()
+    }
+
+    pub fn slice(&self, start: usize, end: usize) -> Matrix {
+        let end = end.min(self.rows);
+        Matrix::new(end - start, self.cols, self.data[start * self.cols..end * self.cols].to_vec())
+    }
+
+    pub fn one_hot(index: usize, num_classes: usize) -> Matrix {
+        let mut data = vec![0.0; num_classes];
+        data[index] = 1.0;
+        Matrix::new(1, num_classes, data)
     }
 
     // Return the index of the maximum value in the data
@@ -237,7 +279,6 @@ impl Matrix {
         Matrix::new(self.rows, self.cols, masked_data)
     }
     
-
     pub fn upper_triangular_mask(size: usize) -> Matrix {
         let mut mask_data = vec![0.0; size * size];
         for i in 0..size {
@@ -285,6 +326,16 @@ impl Matrix {
         Self::random(rows, cols)
     }
 
+    pub fn broadcast(&self, rows: usize) -> Matrix {
+        assert_eq!(self.rows, 1, "Broadcast only supports single-row matrices");
+        let mut data = Vec::new();
+        for _ in 0..rows {
+            data.extend_from_slice(&self.data);
+        }
+        Matrix::new(rows, self.cols, data)
+    }
+
+
     // Add a row vector to every row of the Matrix
     pub fn add_broadcast(&self, vec: &Matrix) -> Matrix {
         assert_eq!(vec.rows, 1, "Vector must have one row for broadcasting.");
@@ -305,6 +356,83 @@ impl Matrix {
         Matrix::new(self.rows, self.cols, clipped_data)
     }
 
+    pub fn add_head(&mut self, head: &Matrix, head_index: usize, head_dim: usize) {
+        // Ensure the dimensions match
+        assert_eq!(head.cols, head_dim, "Head dimension mismatch");
+        assert_eq!(head.rows, self.rows, "Row count mismatch");
+        assert!(head_dim * (head_index + 1) <= self.cols, "Head dimension out of bounds");
+
+        // Determine where to place the data
+        let start_col = head_index * head_dim;
+
+        // Add the head matrix into the target matrix
+        for row in 0..self.rows {
+            for col in 0..head.cols {
+                self.data[row * self.cols + start_col + col] += head.data[row * head.cols + col];
+            }
+        }
+    }
+
+    pub fn extract_head(&self, head: usize, head_dim: usize) -> Matrix {
+        assert!(head_dim * (head + 1) <= self.cols, "Head dimension out of bounds");
+        let mut result = Matrix::zeros(self.rows, head_dim);
+
+        for i in 0..self.rows {
+            let start = head * head_dim;
+            let end = start + head_dim;
+            result.data[i * head_dim..(i + 1) * head_dim]
+                .copy_from_slice(&self.data[i * self.cols + start..i * self.cols + end]);
+        }
+
+        result
+    }
+
+    pub fn concat_heads(heads: &[Matrix]) -> Matrix {
+        let rows = heads[0].rows;
+        let cols: usize = heads.iter().map(|h| h.cols).sum();
+        let mut concatenated = Matrix::zeros(rows, cols);
+
+        for (head_idx, head) in heads.iter().enumerate() {
+            for i in 0..rows {
+                let start_col = head_idx * head.cols;
+                let end_col = start_col + head.cols;
+                concatenated.data[i * cols + start_col..i * cols + end_col]
+                    .copy_from_slice(&head.data[i * head.cols..(i + 1) * head.cols]);
+            }
+        }
+
+        concatenated
+    }
+
+    pub fn mean(&self) -> f64 {
+        self.data.iter().sum::<f64>() / self.data.len() as f64
+    }
+
+    pub fn mean_axis(&self, axis: usize) -> Matrix {
+        match axis {
+            0 => {
+                // Mean along rows
+                let mut result = vec![0.0; self.cols];
+                for row in 0..self.rows {
+                    for col in 0..self.cols {
+                        result[col] += self.data[row * self.cols + col];
+                    }
+                }
+                for col in 0..self.cols {
+                    result[col] /= self.rows as f64;
+                }
+                Matrix::new(1, self.cols, result)
+            }
+            _ => panic!("Unsupported axis for mean_axis"),
+        }
+    }
+
+    pub fn variance(&self) -> f64 {
+        let mean = self.mean();
+        self.data.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / self.data.len() as f64
+    }
+
+
     // Apply the funcion to the data
     pub fn apply<F>(&self, func: F) -> Matrix
     where
@@ -312,6 +440,28 @@ impl Matrix {
     {
         let data: Vec<f64> = self.data.iter().map(|&x| func(x)).collect();
         Matrix::new(self.rows, self.cols, data)
+    }
+
+    /// Applies a row-wise function (like softmax) to the matrix.
+    pub fn apply_row_wise<F>(&self, func: F) -> Matrix
+    where
+        F: Fn(&[f64]) -> Vec<f64>,
+    {
+        let mut result_data = Vec::new();
+
+        for row in 0..self.rows {
+            let start = row * self.cols;
+            let end = start + self.cols;
+            let row_slice = &self.data[start..end]; // Get a row slice
+            let processed_row = func(row_slice);   // Apply the function
+            result_data.extend_from_slice(&processed_row);
+        }
+
+        Matrix {
+            rows: self.rows,
+            cols: self.cols,
+            data: result_data,
+        }
     }
 
     // Print the matrices in a readable format
@@ -415,6 +565,15 @@ impl Mul<f64> for Matrix {
     }
 }
 
+impl<'a> Mul<f64> for &'a Matrix {
+    type Output = Matrix;
+
+    fn mul(self, scalar: f64) -> Matrix {
+        let data: Vec<f64> = self.data.iter().map(|&x| x * scalar).collect();
+        Matrix::new(self.rows, self.cols, data)
+    }
+}
+
 // Implement Scalar multiplication assgn (*=) for Matrix
 impl MulAssign<f64> for Matrix {
     fn mul_assign(&mut self, scalar: f64) {
@@ -430,6 +589,7 @@ impl Dot for Matrix {
     type Output = Matrix;
 
     fn dot(&self, other: &Matrix) -> Self::Output {
+        
         assert_eq!(self.cols, other.rows, "Matrix dimension mismatch for dot product");
 
         let mut result = Matrix::zeros(self.rows, other.cols);
@@ -477,9 +637,28 @@ impl Outer for Matrix {
     }
 }
 
-// Implement Add for Matrix 
+// Implement Add for Matrix
 impl Add for Matrix {
     type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        assert_eq!(self.rows, rhs.rows, "Row dimensions must match");
+        assert_eq!(self.cols, rhs.cols, "Column dimensions must match");
+
+        let data: Vec<f64> = self
+            .data
+            .iter()
+            .zip(rhs.data.iter())
+            .map(|(a, b)| a + b) // Element-wise addition
+            .collect();
+
+        Matrix::new(self.rows, self.cols, data)
+    }
+}
+
+// Implement Add for &Matrix
+impl Add for &Matrix {
+    type Output = Matrix;
 
     fn add(self, rhs: Self) -> Self::Output {
         assert_eq!(self.rows, rhs.rows, "Row dimensions must match");
@@ -507,15 +686,11 @@ impl AddAssign for Matrix {
             .for_each(|(a, b)| *a += b); // Element-wise addition, in-place
     }
 }
-
-// Implement Subtract for Matrix
-impl<T> Sub<T> for Matrix
-where
-    T: std::ops::Deref<Target = Matrix>,
-{
+// Sub for owned matrices (Matrix - Matrix)
+impl Sub for Matrix {
     type Output = Matrix;
 
-    fn sub(self, rhs: T) -> Self::Output {
+    fn sub(self, rhs: Self) -> Self::Output {
         assert_eq!(self.rows, rhs.rows, "Row dimensions must match");
         assert_eq!(self.cols, rhs.cols, "Column dimensions must match");
 
@@ -530,11 +705,49 @@ where
     }
 }
 
-// Sub - returns the difference between 2 matrices
+// Sub for borrowing a matrix (&Matrix - &Matrix)
 impl<'a, 'b> Sub<&'b Matrix> for &'a Matrix {
     type Output = Matrix;
 
     fn sub(self, rhs: &'b Matrix) -> Self::Output {
+        assert_eq!(self.rows, rhs.rows, "Row dimensions must match");
+        assert_eq!(self.cols, rhs.cols, "Column dimensions must match");
+
+        let data: Vec<f64> = self
+            .data
+            .iter()
+            .zip(rhs.data.iter())
+            .map(|(a, b)| a - b)
+            .collect();
+
+        Matrix::new(self.rows, self.cols, data)
+    }
+}
+
+// Sub for owned Matrix with a reference Matrix (Matrix - &Matrix)
+impl<'a> Sub<&'a Matrix> for Matrix {
+    type Output = Matrix;
+
+    fn sub(self, rhs: &'a Matrix) -> Self::Output {
+        assert_eq!(self.rows, rhs.rows, "Row dimensions must match");
+        assert_eq!(self.cols, rhs.cols, "Column dimensions must match");
+
+        let data: Vec<f64> = self
+            .data
+            .iter()
+            .zip(rhs.data.iter())
+            .map(|(a, b)| a - b)
+            .collect();
+
+        Matrix::new(self.rows, self.cols, data)
+    }
+}
+
+// Sub for borrowing Matrix with an owned Matrix (&Matrix - Matrix)
+impl<'a> Sub<Matrix> for &'a Matrix {
+    type Output = Matrix;
+
+    fn sub(self, rhs: Matrix) -> Self::Output {
         assert_eq!(self.rows, rhs.rows, "Row dimensions must match");
         assert_eq!(self.cols, rhs.cols, "Column dimensions must match");
 
@@ -558,5 +771,31 @@ impl SubAssign for Matrix {
         self.data.iter_mut()
             .zip(rhs.data.iter())
             .for_each(|(a, b)| *a -= b); // In-place element-wise subtraction
+    }
+}
+
+impl Div<f64> for Matrix {
+    type Output = Matrix;
+
+    fn div(self, scalar: f64) -> Matrix {
+        let data: Vec<f64> = self.data.iter().map(|&x| x / scalar).collect();
+        Matrix {
+            rows: self.rows,
+            cols: self.cols,
+            data,
+        }
+    }
+}
+
+impl<'a> Div<f64> for &'a Matrix {
+    type Output = Matrix;
+
+    fn div(self, scalar: f64) -> Matrix {
+        let data: Vec<f64> = self.data.iter().map(|&x| x / scalar).collect();
+        Matrix {
+            rows: self.rows,
+            cols: self.cols,
+            data,
+        }
     }
 }
