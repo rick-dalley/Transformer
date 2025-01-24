@@ -5,8 +5,8 @@ use model::Model;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut nn = Model::from_json("/Users/richarddalley/Code/Rust/Transformer/data/config.json")?;
-    nn.print_config();
     nn.load_data()?; // Load data from the CSV file
+    nn.print_config();
     nn.train(true);
 
     Ok(())

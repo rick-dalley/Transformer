@@ -271,29 +271,41 @@ impl Model {
     pub fn split_data(&mut self) {
         println!("Splitting data...");
 
+        // Dynamically calculate split index based on validation_split
+        self.split_index = ((1.0 - self.validation_split) * self.data.rows as f64) as usize;
+
+        // Ensure split_index is valid
+        assert!(
+            self.split_index > 0 && self.split_index < self.data.rows,
+            "Invalid split_index: {}. Ensure validation_split is correctly set.",
+            self.split_index
+        );
+
         // Split data into training and validation sets
         let data_cols = self.data.cols;
-        let split_index = self.split_index;
 
         // Extract rows for training data
         self.training_data = Matrix::new(
-            split_index,
+            self.split_index,
             data_cols,
-            self.data.data[..(split_index * data_cols)].to_vec(),
+            self.data.data[..(self.split_index * data_cols)].to_vec(),
         );
 
         // Extract rows for validation data
         self.validation_data = Matrix::new(
-            self.data.rows - split_index,
+            self.data.rows - self.split_index,
             data_cols,
-            self.data.data[(split_index * data_cols)..].to_vec(),
+            self.data.data[(self.split_index * data_cols)..].to_vec(),
         );
 
         // Split labels into training and validation sets
-        self.training_labels = self.labels[..split_index].to_vec();
-        self.validation_labels = self.labels[split_index..].to_vec();
+        self.training_labels = self.labels[..self.split_index].to_vec();
+        self.validation_labels = self.labels[self.split_index..].to_vec();
 
-        println!("Data split into training and validation sets.");
+        println!(
+            "Data split into training ({}) and validation ({}) sets.",
+            self.training_data.rows, self.validation_data.rows
+        );
     }
 
     //  computes query (Q), key (K), and value (V) matrices, and applies the attention formula:
@@ -454,41 +466,42 @@ impl Model {
         grad_hidden.dot(&self.ff_hidden_weights.transpose())
     }
 
-fn backward_multi_head_attention(
-    &self,
-    gradients: &Matrix,
-    predictions: &Matrix,
-) -> Matrix {
-    let head_dim = self.embed_dim / self.num_heads;
-    let mut attention_gradients = Matrix::zeros(gradients.rows, self.embed_dim);
+    fn backward_multi_head_attention(
+        &self,
+        gradients: &Matrix,
+        predictions: &Matrix,
+    ) -> Matrix {
+        let head_dim = self.embed_dim / self.num_heads;
+        let mut attention_gradients = Matrix::zeros(gradients.rows, self.embed_dim);
 
-    for head in 0..self.num_heads {
-        // Extract gradients for this head
-        let grad_attention = gradients.extract_head(head, head_dim);
+        for head in 0..self.num_heads {
+            // Extract gradients for this head
+            let grad_attention = gradients.extract_head(head, head_dim);
 
-        // Compute gradients for queries, keys, and values
-        let grad_query = grad_attention.dot(&self.output_attention_weights[head].transpose());
-        let pred_head = predictions.extract_head(head, head_dim);
-        let grad_key = grad_attention.transpose().dot(&pred_head);
-        // Map grad_key back to embedding space
-        let grad_key_reduced = pred_head.dot(&grad_key.transpose());
+            // Compute gradients for queries, keys, and values
+            let grad_query = grad_attention.dot(&self.output_attention_weights[head].transpose());
+            let pred_head = predictions.extract_head(head, head_dim);
+            let grad_key = grad_attention.transpose().dot(&pred_head);
+            // Map grad_key back to embedding space
+            let grad_key_reduced = pred_head.dot(&grad_key.transpose());
 
-        // Compute value gradients
-let grad_value = grad_attention.dot(&self.output_attention_weights[head]);
+            // Compute value gradients
+    let grad_value = grad_attention.dot(&self.output_attention_weights[head]);
 
-        // Accumulate gradients for queries, keys, and values
-        attention_gradients.add_head(&grad_query, head, head_dim);
-        attention_gradients.add_head(&grad_key_reduced, head, head_dim);
-        attention_gradients.add_head(&grad_value, head, head_dim);
+            // Accumulate gradients for queries, keys, and values
+            attention_gradients.add_head(&grad_query, head, head_dim);
+            attention_gradients.add_head(&grad_key_reduced, head, head_dim);
+            attention_gradients.add_head(&grad_value, head, head_dim);
+        }
+
+        attention_gradients
     }
-
-    attention_gradients
-}
 
     pub fn train(&mut self, show_progress: bool) {
         let start_time = Instant::now(); // Track training time
 
-        for epoch in 0..self.epochs {
+        // for epoch in 0..self.epochs {
+        for epoch in 0..1 {
             let mut total_loss = 0.0;
             let mut correct_predictions = 0;
 
@@ -564,18 +577,55 @@ let grad_value = grad_attention.dot(&self.output_attention_weights[head]);
             elapsed_time
         );
     }
+pub fn print_config(&self) {
+    println!("Model Configuration:");
+    println!("  Epochs: {}", self.epochs);
+    println!("  Learning Rate: {:.5}", self.learning_rate);
+    println!("  Batch Size: {}", self.batch_size);
+    println!("  Sequence Length: {}", self.sequence_length);
+    println!("  Validation Split: {:.2}%", self.validation_split * 100.0);
+    println!("  Split Index: {}", self.split_index);
+    println!("  Shuffle Data: {}", self.shuffle_data);
+    println!("  Number of Layers: {}", self.num_layers);
+    println!("  Number of Heads: {}", self.num_heads);
+    println!("  Embedding Dimension: {}", self.embed_dim);
+    println!("  Vocabulary Size: {}", self.vocab_size);
+    println!("  Data Location: {}", self.data_location);
 
-// print the config
-    pub fn print_config(&self) {
-        println!("Model Configuration:");
-        println!("  Epochs: {}", self.epochs);
-        println!("  Learning Rate: {}", self.learning_rate);
-        println!("  Shuffle Data: {}", self.shuffle_data);
-        println!("  Validation Split: {}", self.validation_split);
-        println!("  Split Index: {}", self.split_index);
-        println!("  Data Location: {}", self.data_location);
-        println!("  Data Matrix Dimensions: {}x{}", self.data.rows, self.data.cols);
-        println!("  Data Matrix Dimensions: {}x{}", self.data.rows, self.data.cols);
+    // Data dimensions
+    println!("  Data Matrix: {} rows x {} cols", self.data.rows, self.data.cols);
+    println!("  Training Data: {} rows x {} cols", self.training_data.rows, self.training_data.cols);
+    println!("  Validation Data: {} rows x {} cols", self.validation_data.rows, self.validation_data.cols);
 
+    // Labels info
+    println!("  Labels: {} total", self.labels.len());
+    println!("  Training Labels: {} total", self.training_labels.len());
+    println!("  Validation Labels: {} total", self.validation_labels.len());
+
+    // Check attention weights
+    println!("  Attention Weights: {} heads", self.output_attention_weights.len());
+    if let Some(first_attention_weight) = self.output_attention_weights.first() {
+        println!(
+            "  Per-Head Attention Weights: {} rows x {} cols",
+            first_attention_weight.rows, first_attention_weight.cols
+        );
     }
+
+    // Feedforward weights
+    println!(
+        "  Feedforward Hidden Weights: {} rows x {} cols",
+        self.ff_hidden_weights.rows, self.ff_hidden_weights.cols
+    );
+    println!(
+        "  Feedforward Output Weights: {} rows x {} cols",
+        self.ff_output_weights.rows, self.ff_output_weights.cols
+    );
+
+    // Final output weights
+    println!(
+        "  Final Output Weights: {} rows x {} cols",
+        self.final_output_weights.rows, self.final_output_weights.cols
+    );
+}
+
 }
