@@ -577,55 +577,56 @@ impl Model {
             elapsed_time
         );
     }
-pub fn print_config(&self) {
-    println!("Model Configuration:");
-    println!("  Epochs: {}", self.epochs);
-    println!("  Learning Rate: {:.5}", self.learning_rate);
-    println!("  Batch Size: {}", self.batch_size);
-    println!("  Sequence Length: {}", self.sequence_length);
-    println!("  Validation Split: {:.2}%", self.validation_split * 100.0);
-    println!("  Split Index: {}", self.split_index);
-    println!("  Shuffle Data: {}", self.shuffle_data);
-    println!("  Number of Layers: {}", self.num_layers);
-    println!("  Number of Heads: {}", self.num_heads);
-    println!("  Embedding Dimension: {}", self.embed_dim);
-    println!("  Vocabulary Size: {}", self.vocab_size);
-    println!("  Data Location: {}", self.data_location);
 
-    // Data dimensions
-    println!("  Data Matrix: {} rows x {} cols", self.data.rows, self.data.cols);
-    println!("  Training Data: {} rows x {} cols", self.training_data.rows, self.training_data.cols);
-    println!("  Validation Data: {} rows x {} cols", self.validation_data.rows, self.validation_data.cols);
+    pub fn print_config(&self) {
+        println!("Model Configuration:");
+        println!("  Epochs: {}", self.epochs);
+        println!("  Learning Rate: {:.5}", self.learning_rate);
+        println!("  Batch Size: {}", self.batch_size);
+        println!("  Sequence Length: {}", self.sequence_length);
+        println!("  Validation Split: {:.2}%", self.validation_split * 100.0);
+        println!("  Split Index: {}", self.split_index);
+        println!("  Shuffle Data: {}", self.shuffle_data);
+        println!("  Number of Layers: {}", self.num_layers);
+        println!("  Number of Heads: {}", self.num_heads);
+        println!("  Embedding Dimension: {}", self.embed_dim);
+        println!("  Vocabulary Size: {}", self.vocab_size);
+        println!("  Data Location: {}", self.data_location);
 
-    // Labels info
-    println!("  Labels: {} total", self.labels.len());
-    println!("  Training Labels: {} total", self.training_labels.len());
-    println!("  Validation Labels: {} total", self.validation_labels.len());
+        // Data dimensions
+        println!("  Data Matrix: {} rows x {} cols", self.data.rows, self.data.cols);
+        println!("  Training Data: {} rows x {} cols", self.training_data.rows, self.training_data.cols);
+        println!("  Validation Data: {} rows x {} cols", self.validation_data.rows, self.validation_data.cols);
 
-    // Check attention weights
-    println!("  Attention Weights: {} heads", self.output_attention_weights.len());
-    if let Some(first_attention_weight) = self.output_attention_weights.first() {
+        // Labels info
+        println!("  Labels: {} total", self.labels.len());
+        println!("  Training Labels: {} total", self.training_labels.len());
+        println!("  Validation Labels: {} total", self.validation_labels.len());
+
+        // Check attention weights
+        println!("  Attention Weights: {} heads", self.output_attention_weights.len());
+        if let Some(first_attention_weight) = self.output_attention_weights.first() {
+            println!(
+                "  Per-Head Attention Weights: {} rows x {} cols",
+                first_attention_weight.rows, first_attention_weight.cols
+            );
+        }
+
+        // Feedforward weights
         println!(
-            "  Per-Head Attention Weights: {} rows x {} cols",
-            first_attention_weight.rows, first_attention_weight.cols
+            "  Feedforward Hidden Weights: {} rows x {} cols",
+            self.ff_hidden_weights.rows, self.ff_hidden_weights.cols
+        );
+        println!(
+            "  Feedforward Output Weights: {} rows x {} cols",
+            self.ff_output_weights.rows, self.ff_output_weights.cols
+        );
+
+        // Final output weights
+        println!(
+            "  Final Output Weights: {} rows x {} cols",
+            self.final_output_weights.rows, self.final_output_weights.cols
         );
     }
-
-    // Feedforward weights
-    println!(
-        "  Feedforward Hidden Weights: {} rows x {} cols",
-        self.ff_hidden_weights.rows, self.ff_hidden_weights.cols
-    );
-    println!(
-        "  Feedforward Output Weights: {} rows x {} cols",
-        self.ff_output_weights.rows, self.ff_output_weights.cols
-    );
-
-    // Final output weights
-    println!(
-        "  Final Output Weights: {} rows x {} cols",
-        self.final_output_weights.rows, self.final_output_weights.cols
-    );
-}
 
 }
