@@ -110,6 +110,18 @@ impl Matrix {
         &self.data[row * self.cols + col]
     }
 
+    // Return the index of the maximum value in the data
+    pub fn argmax(&self) -> usize {
+        // Assume it's a vector; precondition checked elsewhere
+        self.data
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .map(|(index, _)| index)
+            .unwrap_or_else(|| panic!("Matrix is empty, cannot compute argmax."))
+    }
+
+    // argmax_row
     pub fn argmax_row(slice: &[f64]) -> usize {
         slice
             .iter()
@@ -117,6 +129,31 @@ impl Matrix {
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
             .map(|(index, _)| index)
             .expect("Slice is empty")
+    }
+    
+    pub fn softmax_row(&self, input: &[f64]) -> Vec<f64> {
+        let max_input = input.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let exp_values: Vec<f64> = input.iter().map(|&x| (x - max_input).exp()).collect();
+        let sum_exp = exp_values.iter().sum::<f64>();
+        exp_values.iter().map(|&x| x / sum_exp).collect()
+    }
+
+    pub fn softmax(&self) -> Matrix {
+        let mut result_data = Vec::new();
+        
+        for row in 0..self.rows {
+            let start = row * self.cols;
+            let end = start + self.cols;
+            let row_slice = &self.data[start..end]; // Get a row slice
+            let processed_row = self.softmax_row(row_slice); // Apply the softmax function on the row
+            result_data.extend_from_slice(&processed_row);
+        }
+
+        Matrix {
+            rows: self.rows,
+            cols: self.cols,
+            data: result_data,
+        }
     }
 
 
@@ -214,6 +251,7 @@ impl Matrix {
         }
     }
 
+
     pub fn column_to_indices(&self, column_index: usize) -> Vec<usize> {
         assert!(
             column_index < self.cols,
@@ -221,10 +259,18 @@ impl Matrix {
             self.cols
         );
 
-        self.data
-            .chunks(self.cols) // Iterate over rows
-            .map(|row| row[column_index] as usize) // Extract the specified column and cast to usize
-            .collect()
+        // Preallocate the vector for efficiency
+        let mut indices = Vec::with_capacity(self.rows);
+
+        // Use an iterator to calculate indices and collect into the result
+        indices.extend(
+            (0..self.rows).map(|row| unsafe {
+                // Directly access without bounds checks
+                *self.data.get_unchecked(row * self.cols + column_index) as usize
+            }),
+        );
+
+        indices
     }
 
     pub fn slice(&self, start: usize, end: usize) -> Matrix {
@@ -236,22 +282,6 @@ impl Matrix {
         let mut data = vec![0.0; num_classes];
         data[index] = 1.0;
         Matrix::new(1, num_classes, data)
-    }
-
-    // Return the index of the maximum value in the data
-    pub fn argmax(&self) -> usize {
-        // Ensure the matrix is a column vector (1D vector)
-        if self.rows != 1 && self.cols != 1 {
-            panic!("argmax is only valid for vectors (1 row or 1 column).");
-        }
-
-        // Find the index of the maximum value in the data
-        self.data
-            .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-            .map(|(index, _)| index)
-            .expect("Matrix is empty, cannot compute argmax.")
     }
 
 
@@ -442,27 +472,6 @@ impl Matrix {
         Matrix::new(self.rows, self.cols, data)
     }
 
-    /// Applies a row-wise function (like softmax) to the matrix.
-    pub fn apply_row_wise<F>(&self, func: F) -> Matrix
-    where
-        F: Fn(&[f64]) -> Vec<f64>,
-    {
-        let mut result_data = Vec::new();
-
-        for row in 0..self.rows {
-            let start = row * self.cols;
-            let end = start + self.cols;
-            let row_slice = &self.data[start..end]; // Get a row slice
-            let processed_row = func(row_slice);   // Apply the function
-            result_data.extend_from_slice(&processed_row);
-        }
-
-        Matrix {
-            rows: self.rows,
-            cols: self.cols,
-            data: result_data,
-        }
-    }
 
     // Print the matrices in a readable format
     pub fn pretty_print(&self) {
@@ -581,32 +590,36 @@ impl MulAssign<f64> for Matrix {
     }
 }
 
-// Implement dot product for Matrix
-// This currently uses a triple loop for matrix multiplication, which works but isn’t optimal for larger matrices. 
-// You might explore using a crate like 'nalgebra' or 
-// optimize the implementation with SIMD (Single Instruction, Multiple Data) for faster execution
 impl Dot for Matrix {
     type Output = Matrix;
 
     fn dot(&self, other: &Matrix) -> Self::Output {
-        
         assert_eq!(self.cols, other.rows, "Matrix dimension mismatch for dot product");
 
+        let block_size = 64; // Cache-friendly block size (adjust as needed)
         let mut result = Matrix::zeros(self.rows, other.cols);
 
-        for i in 0..self.rows {
-            for j in 0..other.cols {
-                let mut sum = 0.0;
-                for k in 0..self.cols {
-                    sum += self.data[i * self.cols + k] * other.data[k * other.cols + j];
+        for i_block in (0..self.rows).step_by(block_size) {
+            for j_block in (0..other.cols).step_by(block_size) {
+                for k_block in (0..self.cols).step_by(block_size) {
+                    for i in i_block..(i_block + block_size).min(self.rows) {
+                        for j in j_block..(j_block + block_size).min(other.cols) {
+                            let mut sum = 0.0;
+                            for k in k_block..(k_block + block_size).min(self.cols) {
+                                sum += self.data[i * self.cols + k] * other.data[k * other.cols + j];
+                            }
+                            result.data[i * other.cols + j] += sum;
+                        }
+                    }
                 }
-                result.data[i * other.cols + j] = sum;
             }
         }
 
         result
     }
+
 }
+
 
 // Implement Outer product for matrix
 impl Outer for Matrix {

@@ -1,6 +1,8 @@
 {
   "data_file": "/Users/richarddalley/Code/Rust/Transformer/data/all_stocks_5yr.csv",
-  "epochs": 5,
+  "cap_data_rows": true,
+  "max_data_rows": 5000,
+  "epochs": 1,
   "learning_rate": 0.3,
   "vocab_size": 10000,
   "shuffle_data": true,
@@ -9,6 +11,10 @@
   "batch_size": 32,
   "num_heads": 8,
   "num_layers": 6,
+  "activation_fn_name": "leaky_relu",
+  "activation_alpha": 0.01,
+  "derivative_fn_name": "leaky_relu_derivative",
+  "derivative_alpha": 0.01,
   "model_dimensions": 512,
   "hidden_dimensions": 2048,
   "columns": {

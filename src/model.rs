@@ -1,8 +1,8 @@
 // module Model
 // Richard Dalley
 
+use crate::activation_functions::{self};
 use crate::matrix::{Matrix, Dot};
-use crate::activation_functions::*;
 use serde::Deserialize;
 use std::fs::File;
 use std::io::BufReader;
@@ -15,6 +15,8 @@ use std::io::{self, Write};
 #[derive(Deserialize)]
 pub struct Config {
     pub data_file: String,
+    pub cap_data_rows: bool,
+    pub max_data_rows: usize,
     pub epochs: usize,
     pub learning_rate: f64,
     pub vocab_size: usize, // Size of the vocabulary for embedding
@@ -27,6 +29,11 @@ pub struct Config {
     pub model_dimensions: usize,
     pub hidden_dimensions: usize,
     pub columns: ColumnsConfig, // Add this field
+    pub activation_fn_name: String,
+    pub activation_alpha:f64,
+    pub derivative_fn_name: String,
+    pub derivative_alpha:f64,
+ 
 }
 
 #[derive(Deserialize)]
@@ -36,10 +43,13 @@ pub struct ColumnsConfig {
     pub target: String,
     pub categorical_column: String,
 }
+
+
 // Model
-#[derive(Debug)] 
 pub struct Model {
     epochs: usize,
+    cap_data_rows: bool,
+    max_data_rows: usize,
     learning_rate: f64,
     shuffle_data: bool,
     validation_split: f64,
@@ -55,6 +65,7 @@ pub struct Model {
     ff_hidden_weights: Matrix, // First linear layer weights
     ff_output_weights: Matrix, // Second linear layer weights
     final_output_weights: Matrix, 
+    embedding_matrix: Matrix,
     columns: ColumnsConfig,
     data: Matrix,
     training_data:Matrix,
@@ -62,6 +73,9 @@ pub struct Model {
     labels: Vec<usize>,
     training_labels: Vec<usize>,
     validation_labels: Vec<usize>,
+    activation_fn: Box<dyn activation_functions::ActivationTrait>,
+    derivative_fn: Box<dyn activation_functions::ActivationTrait>,
+
 }
 
 
@@ -75,9 +89,31 @@ impl Model {
 
         // Parse the JSON into a Config struct
         let config: Config = from_reader(reader)?;
+
+
+        let activation_fn:Box<dyn activation_functions::ActivationTrait> = match config.activation_fn_name.to_lowercase().as_str() {
+            "sigmoid" =>  Box::new(activation_functions::Sigmoid),
+            "swish" =>  Box::new(activation_functions::Swish),
+            "relu" =>  Box::new(activation_functions::ReLU),
+            "leaky_relu" =>   Box::new(activation_functions::LeakyReLU { alpha: config.activation_alpha }),
+            "elu" =>  Box::new(activation_functions::ELU { alpha: config.activation_alpha }),
+            "tanh" =>  Box::new(activation_functions::TanH),
+            _ => panic!("Unknown activation function: {}", config.activation_fn_name.to_lowercase().as_str()),
+        };
+
+        let derivative_fn:Box<dyn activation_functions::ActivationTrait> = match config.derivative_fn_name.to_lowercase().as_str() {
+            "sigmoid_derivative" =>  Box::new(activation_functions::SigmoidDerivative),
+            "relu_derivative" =>  Box::new(activation_functions::ReLUDerivative),
+            "leaky_relu_derivative" =>  Box::new(activation_functions::LeakyReLUDerivative { alpha: config.derivative_alpha }),
+            "elu_derivative" =>  Box::new(activation_functions::ELUDerivative { alpha: config.derivative_alpha }),
+            _ => panic!("Unknown activation function: {}", config.derivative_fn_name.to_lowercase().as_str()),
+        };
+
         // Initialize the Model struct
         let mut model = Self {
             epochs: config.epochs,
+            cap_data_rows:config.cap_data_rows,
+            max_data_rows: config.max_data_rows,
             learning_rate: config.learning_rate,
             shuffle_data: config.shuffle_data,
             vocab_size: config.vocab_size,
@@ -102,17 +138,28 @@ impl Model {
             labels: vec![],
             training_labels: vec![],
             validation_labels: vec![],
-
+            embedding_matrix: Matrix::random(config.vocab_size, config.model_dimensions),
+            activation_fn : activation_fn,
+            derivative_fn : derivative_fn
         };
 
         // Assign data split index based on validation split
-        // Assign data split index based on validation split
         model.split_index = ((1.0 - config.validation_split) * config.sequence_length as f64) as usize;
-
         // Initialize weights with suitable random distributions
 
         Ok(model)
     }
+
+    // Use activation functions in methods
+    pub fn apply_activation_fn(&self, x: f64) -> f64 {
+        self.activation_fn.apply(x)
+    }
+
+    pub fn apply_derivative_fn(&self, x: f64) -> f64 {
+        self.derivative_fn.apply(x)
+    }
+
+
 
     pub fn load_data(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let mut reader = ReaderBuilder::new()
@@ -145,8 +192,14 @@ impl Model {
         let mut labels: Vec<f64> = Vec::new();
         let mut categorical_values: Vec<String> = Vec::new();
 
+        let mut row_count = 0; // Track the number of rows processed
+
         // Read and process the data
         for record in reader.records() {
+            if self.cap_data_rows && row_count >= self.max_data_rows {
+                break; // Stop processing if cap_data_rows is enabled and max_data_rows is reached
+            }
+
             let record = record?;
 
             // Extract features
@@ -163,8 +216,8 @@ impl Model {
             categorical_values.push(record[categorical_index].to_string());
 
             raw_data.push(features);
+            row_count += 1; // Increment the row count
         }
-
         // Normalize features dynamically (z-score normalization)
         let num_features = raw_data[0].len();
         let mut feature_means = vec![0.0; num_features];
@@ -310,7 +363,6 @@ impl Model {
 
     //  computes query (Q), key (K), and value (V) matrices, and applies the attention formula:
     // Attention}(Q, K, V) = softmax(QK^T / √d_k) * V
-    // NOTE: the softmax function must be applied ROW WISE
     fn scaled_dot_product_attention(
         &self,
         query: &Matrix,
@@ -318,22 +370,35 @@ impl Model {
         value: &Matrix,
     ) -> Matrix {
         let d_k = query.cols as f64;
+        // Compute the attention scores
         let scores = query.dot(&key.transpose()) / d_k.sqrt();
-        let attention_weights = scores.apply_row_wise(softmax); // Apply softmax row-wise
+        
+        // Apply softmax row-wise to the attention scores
+        let attention_weights = scores.softmax(); // Calls the Matrix's softmax method on scores
+        
+        // Multiply the attention weights by the value matrix
         attention_weights.dot(value)
     }
 
-    pub fn embedding(&self, input: &Vec<usize>, vocab_size: usize, embed_dim: usize) -> Matrix {
-        // Create or initialize an embedding matrix
-        let embedding_matrix = Matrix::random(vocab_size, embed_dim);
-        
-        // Map token indices to embeddings
+    pub fn embedding(&self, input: &Vec<usize>) -> Matrix {
+        // Assume `embedding_matrix` is precomputed and stored in `self.embedding_matrix`
+        let embedding_matrix = &self.embedding_matrix;
+        let embed_dim = embedding_matrix.cols; // Embedding dimension derived from matrix
+
+        // Create the result matrix
         let mut embeddings = Matrix::zeros(input.len(), embed_dim);
-        for (i, &token) in input.iter().enumerate() {
-            for j in 0..embed_dim {
-                embeddings.data[i * embed_dim + j] = embedding_matrix.data[token * embed_dim + j];
-            }
-        }
+
+        // Use iterators and batch copy
+        embeddings
+            .data
+            .chunks_mut(embed_dim) // Split result matrix into mutable row chunks
+            .zip(input.iter()) // Pair each row with its corresponding token index
+            .for_each(|(row, &token)| {
+                let start = token * embed_dim;
+                let end = start + embed_dim;
+                row.copy_from_slice(&embedding_matrix.data[start..end]); // Copy the entire row
+            });
+
         embeddings
     }
 
@@ -381,10 +446,18 @@ impl Model {
         Matrix::concat_heads(&attention_heads)
     }
 
-    pub fn feedforward_network(&self, input: &Matrix) -> Matrix {
-        let hidden = input.dot(&self.ff_hidden_weights).apply(relu);
-        hidden.dot(&self.ff_output_weights)
-    }
+    // pub fn feedforward_network(&self, input: &Matrix) -> Matrix {
+    //     let hidden = input.dot(&self.ff_hidden_weights).apply(relu);
+    //     hidden.dot(&self.ff_output_weights)
+    // }
+
+pub fn feedforward_network(&self, input: &Matrix) -> Matrix {
+    // Use the activation function stored in self.activation_fn
+    let hidden = input.dot(&self.ff_hidden_weights)
+        .apply(|x| self.apply_activation_fn(x));  // Apply the dynamic activation function here
+    
+    hidden.dot(&self.ff_output_weights)
+}
 
     pub fn layer_norm(&self, input: &Matrix) -> Matrix {
         let epsilon = 1e-6;
@@ -411,7 +484,7 @@ impl Model {
         let token_indices = input.column_to_indices(0); // Adjust the column index if needed
 
         // Apply embedding and positional encoding
-        let mut x = self.embedding(&token_indices, self.vocab_size, self.embed_dim);
+        let mut x = self.embedding(&token_indices);
         let positional_enc = self.positional_encoding( self.embed_dim);
         x = x.add_broadcast(&positional_enc);
 
@@ -422,19 +495,20 @@ impl Model {
 
         x
     }
-
-    pub fn output_layer(&self, input: &Matrix) -> Matrix {
-        input.dot(&self.final_output_weights).apply_row_wise(softmax)
-    }
-
- pub fn update_weights(&mut self, gradients: &Matrix, learning_rate: f64) {
-    // Aggregate gradients across the batch to match weight dimensions
-    let aggregated_gradients = gradients.mean_axis(0); // Collapse rows (result: 1 x 512)
-
-    // Apply weight updates
-    self.final_output_weights -= aggregated_gradients.broadcast(self.final_output_weights.rows) * learning_rate;
+pub fn output_layer(&self, input: &Matrix) -> Matrix {
+    let result = input.dot(&self.final_output_weights);  // Perform the dot product
+    result.softmax()  // Apply softmax directly to the resulting matrix
 }
 
+    pub fn update_weights(&mut self, gradients: &Matrix, learning_rate: f64) {
+        // Aggregate gradients across the batch to match weight dimensions
+        let aggregated_gradients = gradients.mean_axis(0); // Collapse rows (result: 1 x 512)
+
+        // Apply weight updates
+        self.final_output_weights -= aggregated_gradients.broadcast(self.final_output_weights.rows) * learning_rate;
+    }
+
+    // backward_transformer
     pub fn backward_transformer(
         &self,
         predictions: &Matrix,
@@ -455,16 +529,27 @@ impl Model {
         gradients
     }
 
-    fn backward_feedforward(&self, gradients: &Matrix) -> Matrix {
 
-        // Derivatives through the second linear layer
-        // let grad_ff_output_weights = gradients.dot(&self.ff_hidden_weights.transpose());
-        let grad_ff_output_weights = gradients.dot(&self.ff_hidden_weights);
-        // Backpropagate activation function
-        let grad_hidden = grad_ff_output_weights.apply(|x| relu_derivative(x));
+    // fn backward_feedforward(&self, gradients: &Matrix) -> Matrix {
 
-        grad_hidden.dot(&self.ff_hidden_weights.transpose())
-    }
+    //     // Derivatives through the second linear layer
+    //     // let grad_ff_output_weights = gradients.dot(&self.ff_hidden_weights.transpose());
+    //     let grad_ff_output_weights = gradients.dot(&self.ff_hidden_weights);
+    //     // Backpropagate activation function
+    //     let grad_hidden = grad_ff_output_weights.apply(|x| relu_derivative(x));
+
+    //     grad_hidden.dot(&self.ff_hidden_weights.transpose())
+    // }
+
+fn backward_feedforward(&self, gradients: &Matrix) -> Matrix {
+    // Derivatives through the second linear layer
+    let grad_ff_output_weights = gradients.dot(&self.ff_hidden_weights);
+    
+    // Backpropagate activation function using the stored activation derivative function
+    let grad_hidden = grad_ff_output_weights.apply(|x| self.apply_derivative_fn(x));
+
+    grad_hidden.dot(&self.ff_hidden_weights.transpose())
+}
 
     fn backward_multi_head_attention(
         &self,
@@ -500,8 +585,7 @@ impl Model {
     pub fn train(&mut self, show_progress: bool) {
         let start_time = Instant::now(); // Track training time
 
-        // for epoch in 0..self.epochs {
-        for epoch in 0..1 {
+        for epoch in 0..self.epochs {
             let mut total_loss = 0.0;
             let mut correct_predictions = 0;
 
@@ -520,17 +604,14 @@ impl Model {
                 // Compute loss (e.g., mean squared error)
                 let mut batch_loss = 0.0;
 
-                for (predicted, &true_label) in outputs.rows_iter().zip(batch_labels.iter()) {
-                    // Convert the predicted slice into a row Matrix
-                    let predicted_matrix = Matrix::from_row(predicted.to_vec());
-
-                    // Create a one-hot target Matrix
-                    let target = Matrix::one_hot(true_label, outputs.cols);
-
-                    // Perform the subtraction and compute loss
-                    batch_loss += (&predicted_matrix - &target)
-                        .apply(|x| x.powi(2))
-                        .mean(); // MSE
+                // Precompute target batch
+                let target_batch = Matrix::from_labels(batch_labels, outputs.cols); 
+                for (predicted_row, target_row) in outputs.rows_iter().zip(target_batch.rows_iter()) {
+                    batch_loss += predicted_row
+                        .iter()
+                        .zip(target_row.iter())
+                        .map(|(p, t)| (p - t).powi(2))
+                        .sum::<f64>() / outputs.cols as f64; // Mean Squared Error
                 }
 
                 total_loss += batch_loss;
@@ -596,8 +677,11 @@ impl Model {
         // Data dimensions
         println!("  Data Matrix: {} rows x {} cols", self.data.rows, self.data.cols);
         println!("  Training Data: {} rows x {} cols", self.training_data.rows, self.training_data.cols);
-        println!("  Validation Data: {} rows x {} cols", self.validation_data.rows, self.validation_data.cols);
+        if self.cap_data_rows {
+            println!("  Capped for debugging for this run");
+        }
 
+        println!("  Validation Data: {} rows x {} cols", self.validation_data.rows, self.validation_data.cols);
         // Labels info
         println!("  Labels: {} total", self.labels.len());
         println!("  Training Labels: {} total", self.training_labels.len());
