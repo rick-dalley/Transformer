@@ -2,8 +2,6 @@
 // ActivationFn
 pub type ActivationFn = fn(f64) -> f64;
 
-
-
 pub trait ActivationTrait {
     fn apply(&self, x: f64) -> f64;
 }
@@ -14,8 +12,7 @@ impl ActivationTrait for Sigmoid {
     fn apply(&self, x: f64) -> f64 {
         1.0 / (1.0 + (-x).exp())
     }
-
-}
+} 
 
 pub struct SigmoidDerivative;
 impl ActivationTrait for SigmoidDerivative {
