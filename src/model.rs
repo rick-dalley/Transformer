@@ -33,7 +33,7 @@ pub struct Config {
     pub activation_alpha:f64,
     pub derivative_fn_name: String,
     pub derivative_alpha:f64,
- 
+    pub show_progress: bool,
 }
 
 #[derive(Deserialize)]
@@ -48,6 +48,7 @@ pub struct ColumnsConfig {
 // Model
 pub struct Model {
     epochs: usize,
+    show_progress: bool,
     cap_data_rows: bool,
     max_data_rows: usize,
     learning_rate: f64,
@@ -139,6 +140,7 @@ impl Model {
             training_labels: vec![],
             validation_labels: vec![],
             embedding_matrix: Matrix::random(config.vocab_size, config.model_dimensions),
+            show_progress: config.show_progress,
             activation_fn : activation_fn,
             derivative_fn : derivative_fn
         };
@@ -446,18 +448,14 @@ impl Model {
         Matrix::concat_heads(&attention_heads)
     }
 
-    // pub fn feedforward_network(&self, input: &Matrix) -> Matrix {
-    //     let hidden = input.dot(&self.ff_hidden_weights).apply(relu);
-    //     hidden.dot(&self.ff_output_weights)
-    // }
 
-pub fn feedforward_network(&self, input: &Matrix) -> Matrix {
-    // Use the activation function stored in self.activation_fn
-    let hidden = input.dot(&self.ff_hidden_weights)
-        .apply(|x| self.apply_activation_fn(x));  // Apply the dynamic activation function here
-    
-    hidden.dot(&self.ff_output_weights)
-}
+    pub fn feedforward_network(&self, input: &Matrix) -> Matrix {
+        // Use the activation function stored in self.activation_fn
+        let hidden = input.dot(&self.ff_hidden_weights)
+            .apply(|x| self.apply_activation_fn(x));  // Apply the dynamic activation function here
+        
+        hidden.dot(&self.ff_output_weights)
+    }
 
     pub fn layer_norm(&self, input: &Matrix) -> Matrix {
         let epsilon = 1e-6;
@@ -495,7 +493,8 @@ pub fn feedforward_network(&self, input: &Matrix) -> Matrix {
 
         x
     }
-pub fn output_layer(&self, input: &Matrix) -> Matrix {
+
+    pub fn output_layer(&self, input: &Matrix) -> Matrix {
     let result = input.dot(&self.final_output_weights);  // Perform the dot product
     result.softmax()  // Apply softmax directly to the resulting matrix
 }
@@ -529,19 +528,7 @@ pub fn output_layer(&self, input: &Matrix) -> Matrix {
         gradients
     }
 
-
-    // fn backward_feedforward(&self, gradients: &Matrix) -> Matrix {
-
-    //     // Derivatives through the second linear layer
-    //     // let grad_ff_output_weights = gradients.dot(&self.ff_hidden_weights.transpose());
-    //     let grad_ff_output_weights = gradients.dot(&self.ff_hidden_weights);
-    //     // Backpropagate activation function
-    //     let grad_hidden = grad_ff_output_weights.apply(|x| relu_derivative(x));
-
-    //     grad_hidden.dot(&self.ff_hidden_weights.transpose())
-    // }
-
-fn backward_feedforward(&self, gradients: &Matrix) -> Matrix {
+    fn backward_feedforward(&self, gradients: &Matrix) -> Matrix {
     // Derivatives through the second linear layer
     let grad_ff_output_weights = gradients.dot(&self.ff_hidden_weights);
     
@@ -582,7 +569,7 @@ fn backward_feedforward(&self, gradients: &Matrix) -> Matrix {
         attention_gradients
     }
 
-    pub fn train(&mut self, show_progress: bool) {
+    pub fn train(&mut self) {
         let start_time = Instant::now(); // Track training time
 
         for epoch in 0..self.epochs {
@@ -634,7 +621,7 @@ fn backward_feedforward(&self, gradients: &Matrix) -> Matrix {
                 self.update_weights(&attention_errors, self.learning_rate); // No conflicts now
 
                 // Show progress
-                if show_progress && i % 1000 == 0 {
+                if self.show_progress && i % 1000 == 0 {
                     print!(".");
                     io::stdout().flush().unwrap();
                 }

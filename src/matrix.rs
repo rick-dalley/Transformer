@@ -621,6 +621,7 @@ impl Dot for Matrix {
 }
 
 
+
 // Implement Outer product for matrix
 impl Outer for Matrix {
     type Output = Matrix;

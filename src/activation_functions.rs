@@ -8,7 +8,6 @@ pub trait ActivationTrait {
     fn apply(&self, x: f64) -> f64;
 }
 
-#[allow(unused)]
 pub struct Sigmoid;
 
 impl ActivationTrait for Sigmoid {
@@ -18,7 +17,6 @@ impl ActivationTrait for Sigmoid {
 
 }
 
-#[allow(unused)]
 pub struct SigmoidDerivative;
 impl ActivationTrait for SigmoidDerivative {
     fn apply(&self,x: f64) -> f64 {
@@ -27,7 +25,6 @@ impl ActivationTrait for SigmoidDerivative {
     }
 }
 
-// #[allow(unused)]
 pub struct Swish;
 impl ActivationTrait for Swish{
     fn apply(&self, x: f64) -> f64 {
@@ -90,7 +87,7 @@ impl ActivationTrait for TanH{
 
 pub struct ReLUDerivative;
 impl ActivationTrait for ReLUDerivative{
-fn apply(&self, x: f64) -> f64 {
-    if x > 0.0 { 1.0 } else { 0.0 }
-}
+    fn apply(&self, x: f64) -> f64 {
+        if x > 0.0 { 1.0 } else { 0.0 }
+    }
 }
