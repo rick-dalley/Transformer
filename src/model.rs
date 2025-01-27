@@ -3,7 +3,7 @@
 
 use crate::activation_functions::{self};
 use crate::matrix::{Matrix, Dot};
-use serde::Deserialize;
+
 use std::fs::File;
 use std::io::BufReader;
 use serde_json::from_reader;
@@ -11,40 +11,7 @@ use csv::ReaderBuilder;
 use rand::seq::SliceRandom;
 use std::time::Instant;
 use std::io::{self, Write};
-
-#[derive(Deserialize)]
-pub struct Config {
-    pub data_file: String,
-    pub cap_data_rows: bool,
-    pub max_data_rows: usize,
-    pub epochs: usize,
-    pub learning_rate: f64,
-    pub vocab_size: usize, // Size of the vocabulary for embedding
-    pub shuffle_data: bool,
-    pub validation_split: f64,
-    pub sequence_length: usize,
-    pub batch_size: usize,
-    pub num_heads: usize,
-    pub num_layers: usize,
-    pub model_dimensions: usize,
-    pub hidden_dimensions: usize,
-    pub columns: ColumnsConfig, // Add this field
-    pub activation_fn_name: String,
-    pub activation_alpha:f64,
-    pub derivative_fn_name: String,
-    pub derivative_alpha:f64,
-    pub show_progress: bool,
-}
-
-#[derive(Deserialize)]
-#[derive(Debug)] 
-pub struct ColumnsConfig {
-    pub features: Vec<String>,
-    pub target: String,
-    pub categorical_column: String,
-}
-
-
+use crate::config;
 // Model
 pub struct Model {
     epochs: usize,
@@ -67,7 +34,7 @@ pub struct Model {
     ff_output_weights: Matrix, // Second linear layer weights
     final_output_weights: Matrix, 
     embedding_matrix: Matrix,
-    columns: ColumnsConfig,
+    columns: config::ColumnsConfig,
     data: Matrix,
     training_data:Matrix,
     validation_data: Matrix,
@@ -81,6 +48,7 @@ pub struct Model {
 
 
 impl Model {
+    
 
     // from_json - build a model from json
     pub fn from_json(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
@@ -89,26 +57,10 @@ impl Model {
         let reader = BufReader::new(file);
 
         // Parse the JSON into a Config struct
-        let config: Config = from_reader(reader)?;
+        let config: config::Config = from_reader(reader)?;
 
 
-        let activation_fn:Box<dyn activation_functions::ActivationTrait> = match config.activation_fn_name.to_lowercase().as_str() {
-            "sigmoid" =>  Box::new(activation_functions::Sigmoid),
-            "swish" =>  Box::new(activation_functions::Swish),
-            "relu" =>  Box::new(activation_functions::ReLU),
-            "leaky_relu" =>   Box::new(activation_functions::LeakyReLU { alpha: config.activation_alpha }),
-            "elu" =>  Box::new(activation_functions::ELU { alpha: config.activation_alpha }),
-            "tanh" =>  Box::new(activation_functions::TanH),
-            _ => panic!("Unknown activation function: {}", config.activation_fn_name.to_lowercase().as_str()),
-        };
-
-        let derivative_fn:Box<dyn activation_functions::ActivationTrait> = match config.derivative_fn_name.to_lowercase().as_str() {
-            "sigmoid_derivative" =>  Box::new(activation_functions::SigmoidDerivative),
-            "relu_derivative" =>  Box::new(activation_functions::ReLUDerivative),
-            "leaky_relu_derivative" =>  Box::new(activation_functions::LeakyReLUDerivative { alpha: config.derivative_alpha }),
-            "elu_derivative" =>  Box::new(activation_functions::ELUDerivative { alpha: config.derivative_alpha }),
-            _ => panic!("Unknown activation function: {}", config.derivative_fn_name.to_lowercase().as_str()),
-        };
+        let (activation_fn, derivative_fn) = activation_functions::get_activation_and_derivative(&config);
 
         // Initialize the Model struct
         let mut model = Self {
@@ -160,8 +112,6 @@ impl Model {
     pub fn apply_derivative_fn(&self, x: f64) -> f64 {
         self.derivative_fn.apply(x)
     }
-
-
 
     pub fn load_data(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let mut reader = ReaderBuilder::new()

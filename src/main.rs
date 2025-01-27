@@ -1,4 +1,5 @@
 mod model;
+pub mod config;
 pub mod matrix;
 pub mod activation_functions;
 use model::Model;

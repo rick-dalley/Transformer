@@ -1,11 +1,69 @@
 
+use crate::config;
+
 // ActivationFn
 pub type ActivationFn = fn(f64) -> f64;
 
 pub trait ActivationTrait {
     fn apply(&self, x: f64) -> f64;
 }
-
+pub fn get_activation_and_derivative( config: &config::Config) -> (Box<dyn ActivationTrait>, Box<dyn ActivationTrait>) {
+        match config.activation_fn_name.to_lowercase().as_str() {
+            "sigmoid" => (
+                Box::new(Sigmoid),
+                Box::new(SigmoidDerivative),
+            ),
+            "swish" => (
+                Box::new(Swish),
+                Box::new(SwishDerivative), // Assuming you implement this
+            ),
+            "relu" => (
+                Box::new(ReLU),
+                Box::new(ReLUDerivative),
+            ),
+            "leaky_relu" => (
+                Box::new(LeakyReLU { alpha: config.activation_alpha }),
+                Box::new(LeakyReLUDerivative { alpha: config.activation_alpha }),
+            ),
+            "elu" => (
+                Box::new(ELU { alpha: config.activation_alpha }),
+                Box::new(ELUDerivative { alpha: config.activation_alpha }),
+            ),
+            "gelu" => (
+                Box::new(GELU),
+                Box::new(GELUDerivative), // Assuming you implement this
+            ),
+            "softplus" => (
+                Box::new(Softplus),
+                Box::new(SoftplusDerivative), // Assuming you implement this
+            ),
+            "silu" => (
+                Box::new(SiLU),
+                Box::new(SiLUDerivative), // Assuming you implement this
+            ),
+            "mish" => (
+                Box::new(Mish),
+                Box::new(MishDerivative), // Assuming you implement this
+            ),
+            "hardswish" => (
+                Box::new(HardSwish),
+                Box::new(HardSwishDerivative), // Assuming you implement this
+            ),
+            "softsign" => (
+                Box::new(Softsign),
+                Box::new(SoftsignDerivative), // Assuming you implement this
+            ),
+            "prelu" => (
+                Box::new(PReLU { alpha: config.activation_alpha }),
+                Box::new(PReLUDerivative { alpha: config.activation_alpha }), // Assuming you implement this
+            ),
+            "selu" => (
+                Box::new(SELU { alpha: config.activation_alpha, lambda: config.activation_lambda }),
+                Box::new(SELUDerivative { alpha: config.activation_alpha, lambda: config.activation_lambda }), // Assuming you implement this
+            ),
+            _ => panic!("Unknown activation function: {}", config.activation_fn_name.to_lowercase().as_str()),
+        }
+    }
 pub struct Sigmoid;
 
 impl ActivationTrait for Sigmoid {
@@ -24,6 +82,15 @@ impl ActivationTrait for SigmoidDerivative {
 
 pub struct Swish;
 impl ActivationTrait for Swish{
+    fn apply(&self, x: f64) -> f64 {
+        x * (1.0 / (1.0 + (-x).exp()))
+    }
+}
+
+
+pub struct SwishDerivative;
+
+impl ActivationTrait for SwishDerivative {
     fn apply(&self, x: f64) -> f64 {
         x * (1.0 / (1.0 + (-x).exp()))
     }
@@ -99,11 +166,34 @@ impl ActivationTrait for GELU {
     }
 }
 
+pub struct GELUDerivative;
+
+impl ActivationTrait for GELUDerivative {
+    fn apply(&self, x: f64) -> f64 {
+        // Compute the CDF (Φ(x)) using the error function (erf)
+        let cdf = 0.5 * (1.0 + (x / (2.0f64).sqrt()).tanh()); // Approximation of Φ(x)
+
+        // Compute the PDF (ϕ(x))
+        let pdf = (-0.5 * x * x).exp() / (2.0 * std::f64::consts::PI).sqrt();
+
+        // GELU derivative: Φ(x) + x * ϕ(x)
+        cdf + x * pdf
+    }
+}
+
 pub struct Softplus;
 
 impl ActivationTrait for Softplus {
     fn apply(&self, x: f64) -> f64 {
         (1.0 + x.exp()).ln()
+    }
+}
+
+pub struct SoftplusDerivative;
+
+impl ActivationTrait for SoftplusDerivative {
+    fn apply(&self, x: f64) -> f64 {
+        1.0 / (1.0 + (-x).exp())
     }
 }
 
@@ -115,6 +205,16 @@ impl ActivationTrait for SiLU {
     }
 }
 
+pub struct SiLUDerivative;
+
+impl ActivationTrait for SiLUDerivative {
+    fn apply(&self, x: f64) -> f64 {
+        let sigmoid = 1.0 / (1.0 + (-x).exp());
+        let silu = x * sigmoid;
+        silu + sigmoid * (1.0 - silu)
+    }
+}
+
 pub struct Mish;
 
 impl ActivationTrait for Mish {
@@ -123,11 +223,36 @@ impl ActivationTrait for Mish {
     }
 }
 
+pub struct MishDerivative;
+
+impl ActivationTrait for MishDerivative {
+    fn apply(&self, x: f64) -> f64 {
+        let softplus = (1.0 + x.exp()).ln();
+        let sigmoid = 1.0 / (1.0 + (-x).exp());
+        let sech = 1.0 / softplus.cosh();
+        sigmoid * softplus.tanh() + x * sigmoid * (1.0 - sigmoid) * sech * sech
+    }
+}
+
+
 pub struct HardSwish;
 
 impl ActivationTrait for HardSwish {
     fn apply(&self, x: f64) -> f64 {
         x * (x + 3.0).max(0.0).min(6.0) / 6.0
+    }
+}
+pub struct HardSwishDerivative;
+
+impl ActivationTrait for HardSwishDerivative {
+    fn apply(&self, x: f64) -> f64 {
+        if x > 3.0 {
+            1.0
+        } else if x >= -3.0 {
+            (x + 3.0) / 6.0
+        } else {
+            0.0
+        }
     }
 }
 
@@ -139,6 +264,15 @@ impl ActivationTrait for Softsign {
     }
 }
 
+pub struct SoftsignDerivative;
+
+impl ActivationTrait for SoftsignDerivative {
+    fn apply(&self, x: f64) -> f64 {
+        1.0 / (1.0 + x.abs()).powi(2)
+    }
+}
+
+
 pub struct PReLU {
     pub alpha: f64,
 }
@@ -149,12 +283,26 @@ impl ActivationTrait for PReLU {
     }
 }
 
+pub struct PReLUDerivative {
+    pub alpha: f64,
+}
+
+impl ActivationTrait for PReLUDerivative {
+    fn apply(&self, x: f64) -> f64 {
+        if x > 0.0 { 1.0 } else { self.alpha }
+    }
+}
+
+
 pub struct SELU {
     pub alpha: f64,
     pub lambda: f64,
 }
 
 impl ActivationTrait for SELU {
+    // recommended values for alpha and lambda:
+    // α ≈ 1.6732632423543772
+    // λ ≈ 1.0507009873554802
     fn apply(&self, x: f64) -> f64 {
         if x > 0.0 {
             self.lambda * x
@@ -163,3 +311,19 @@ impl ActivationTrait for SELU {
         }
     }
 }
+
+pub struct SELUDerivative {
+    pub alpha: f64,
+    pub lambda: f64,
+}
+
+impl ActivationTrait for SELUDerivative {
+    fn apply(&self, x: f64) -> f64 {
+        if x > 0.0 {
+            self.lambda
+        } else {
+            self.lambda * self.alpha * x.exp()
+        }
+    }
+}
+                
