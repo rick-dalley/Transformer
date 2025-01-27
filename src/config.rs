@@ -21,8 +21,6 @@ pub struct Config {
     pub activation_fn_name: String,
     pub activation_alpha:f64,
     pub activation_lambda:f64,
-    pub derivative_fn_name: String,
-    pub derivative_alpha:f64,
     pub show_progress: bool,
 }
 

@@ -571,9 +571,17 @@ impl Model {
                 self.update_weights(&attention_errors, self.learning_rate); // No conflicts now
 
                 // Show progress
-                if self.show_progress && i % 1000 == 0 {
-                    print!(".");
-                    io::stdout().flush().unwrap();
+                if self.show_progress  {
+                    if i > 0{
+                        if i % 10000 == 0{
+                            print!(" ");
+                            io::stdout().flush().unwrap();
+                        } else if i % 1000 == 0{
+                            print!("*");
+                            io::stdout().flush().unwrap();
+                        }
+
+                    }
                 }
             }
 

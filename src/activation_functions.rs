@@ -7,6 +7,8 @@ pub type ActivationFn = fn(f64) -> f64;
 pub trait ActivationTrait {
     fn apply(&self, x: f64) -> f64;
 }
+
+//choose the activation (and derivative) functions to be used while training
 pub fn get_activation_and_derivative( config: &config::Config) -> (Box<dyn ActivationTrait>, Box<dyn ActivationTrait>) {
         match config.activation_fn_name.to_lowercase().as_str() {
             "sigmoid" => (
