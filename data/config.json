@@ -5,6 +5,7 @@
   "cap_data_rows": true,
   "max_data_rows": 1260,
   "epochs": 1,
+  "check_points": 0,
   "learning_rate": 0.3,
   "vocab_size": 10000,
   "classify": false,

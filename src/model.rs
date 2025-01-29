@@ -9,12 +9,15 @@ use crate::activation_functions::{self};
 use crate::config;
 use crate::matrix::{Matrix, Dot};
 use crate::data_loader::DataLoader;
-
+use serde::{Serialize, Deserialize};
+use std::fs::File;
+use std::io::Write;
 
 // Model
 pub struct Model<'a> {
     pub data_loader: &'a mut DataLoader,
     epochs: usize,
+    checkpoint: usize,
     learning_rate: f64,
     classify: bool,
     batch_size: usize,
@@ -30,6 +33,12 @@ pub struct Model<'a> {
     derivative_fn: Box<dyn activation_functions::ActivationTrait>,
 }
 
+#[derive(Serialize, Deserialize)]
+struct ModelCheckpoint {
+    final_output_weights: Vec<f64>,
+    ff_hidden_weights: Vec<f64>,
+    ff_output_weights: Vec<f64>,
+}
 
 impl<'a> Model<'a> {
     
@@ -41,6 +50,7 @@ impl<'a> Model<'a> {
         let config_clone = config.clone();
         let num_classes = 6;
         let epochs= config.epochs;
+        let checkpoint = config.checkpoint_interval;
         let learning_rate =  config.learning_rate;
         let classify =  config.classify;
         let num_heads =  config.num_heads;
@@ -68,6 +78,7 @@ impl<'a> Model<'a> {
         let model = Self {
             data_loader,
             epochs,
+            checkpoint,
             learning_rate,
             classify,
             num_heads,
@@ -321,6 +332,21 @@ impl<'a> Model<'a> {
         }
     }
 
+
+
+    pub fn save_checkpoint(&self, path: &str) -> std::io::Result<()> {
+        let checkpoint = ModelCheckpoint {
+            final_output_weights: self.final_output_weights.data.clone(),
+            ff_hidden_weights: self.ff_hidden_weights.data.clone(),
+            ff_output_weights: self.ff_output_weights.data.clone(),
+        };
+
+        let json = serde_json::to_string(&checkpoint)?;
+        let mut file = File::create(path)?;
+        file.write_all(json.as_bytes())?;
+        Ok(())
+    }
+
     pub fn print_config(&self) {
         println!("Model Configuration:");
         println!("  Epochs: {}", self.epochs);
@@ -498,6 +524,13 @@ impl<'a> Model<'a> {
                 // Update progress bar
                 pb.inc(1);
             }
+
+            // check if it's time to do a check point
+            if epoch % self.checkpoint == 0 {
+                println!("Saving...");
+                self.save_checkpoint("model_checkpoint.json").expect("Failed to save model.");
+            }
+
 
             println!(
                 "Epoch {}/{} - Loss: {:.4}",
