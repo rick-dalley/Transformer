@@ -1,70 +1,61 @@
 // module Model
 // Richard Dalley
 
-use crate::activation_functions::{self};
-use crate::matrix::{Matrix, Dot};
-use std::io::Write;
-use std::fs::File;
-use std::io::BufReader;
-use serde_json::from_reader;
-use csv::ReaderBuilder;
-use rand::seq::SliceRandom;
 use std::time::Instant;
-use crate::config;
+
 use indicatif::{ProgressBar, ProgressStyle};
-use redis::{Commands, RedisResult};
-use postgres::{Client, NoTls};
+
+use crate::activation_functions::{self};
+use crate::config;
+use crate::matrix::{Matrix, Dot};
+use crate::data_loader::DataLoader;
+
 
 // Model
-pub struct Model {
+pub struct Model<'a> {
+    pub data_loader: &'a mut DataLoader,
     epochs: usize,
-    cap_data_rows: bool,
-    max_data_rows: usize,
     learning_rate: f64,
     classify: bool,
-    shuffle_data: bool,
-    validation_split: f64,
-    sequence_length: usize,
-    split_index: usize,
     batch_size: usize,
-    data_source: String, 
-    connection_string:String,
-    data_location: String,
     num_layers: usize, 
     num_heads: usize, 
     embed_dim: usize, 
-    vocab_size: usize, // Size of the vocabulary for embedding
     output_attention_weights: Vec<Matrix>,
     ff_hidden_weights: Matrix, // First linear layer weights
     ff_output_weights: Matrix, // Second linear layer weights
     final_output_weights: Matrix, 
     embedding_matrix: Matrix,
-    columns: config::ColumnsConfig,
-    data: Matrix,
-    training_data:Matrix,
-    validation_data: Matrix,
-    labels: Vec<usize>,
-    training_labels: Vec<usize>,
-    validation_labels: Vec<usize>,
     activation_fn: Box<dyn activation_functions::ActivationTrait>,
     derivative_fn: Box<dyn activation_functions::ActivationTrait>,
 }
 
 
-impl Model {
+impl<'a> Model<'a> {
     
 
     // from_json - build a model from json
-    pub fn from_json(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn from_json(config: &config::Config, data_loader:&'a mut DataLoader) -> Result<Self, Box<dyn std::error::Error>> {
+
         // Open the JSON file
-        let file = File::open(path)?;
-        let reader = BufReader::new(file);
-
-        // Parse the JSON into a Config struct
-        let config: config::Config = from_reader(reader)?;
+        let config_clone = config.clone();
         let num_classes = 6;
+        let epochs= config.epochs;
+        let learning_rate =  config.learning_rate;
+        let classify =  config.classify;
+        let num_heads =  config.num_heads;
+        let num_layers =  config.num_layers;
+        let batch_size = config.batch_size;
+        let embed_dim =  config.model_dimensions;
+        let output_attention_weights =  (0..config.num_heads)
+            .map(|_| Matrix::random(config.model_dimensions / config.num_heads, config.model_dimensions / config.num_heads))
+            .collect();            
+        let ff_hidden_weights =  Matrix::random(config.model_dimensions, config.hidden_dimensions);
+        let ff_output_weights =  Matrix::random(config.hidden_dimensions, config.model_dimensions);
+        let embedding_matrix =  Matrix::random(config.vocab_size, config.model_dimensions);
 
-        let (activation_fn, derivative_fn) = activation_functions::get_activation_and_derivative(&config);
+        let (activation_fn, derivative_fn) = activation_functions::get_activation_and_derivative(&config_clone);
+
         let final_output_weights = if config.classify {
             // For classification, the number of classes defines the output size
             Matrix::random(config.model_dimensions, num_classes)
@@ -72,47 +63,26 @@ impl Model {
             // For regression, the output size is always 1
             Matrix::random(config.model_dimensions, 1)
         };
-
+        
         // Initialize the Model struct
-        let mut model = Self {
-            epochs: config.epochs,
-            cap_data_rows:config.cap_data_rows,
-            max_data_rows: config.max_data_rows,
-            learning_rate: config.learning_rate,
-            classify: config.classify,
-            shuffle_data: config.shuffle_data,
-            vocab_size: config.vocab_size,
-            validation_split: config.validation_split,
-            num_heads: config.num_heads,
-            num_layers: config.num_layers,
-            batch_size: config.batch_size,
-            embed_dim: config.model_dimensions,
-            data_source: config.data_source.clone(),
-            connection_string:config.connection_string.clone(),
-            data_location: config.location.clone(),
-            split_index: 0, // To be calculated during data processing
-            sequence_length: config.sequence_length,
-            columns: config.columns,
-            output_attention_weights: (0..config.num_heads)
-                .map(|_| Matrix::random(config.model_dimensions / config.num_heads, config.model_dimensions / config.num_heads))
-                .collect(),            
-            ff_hidden_weights: Matrix::random(config.model_dimensions, config.hidden_dimensions),
-            ff_output_weights: Matrix::random(config.hidden_dimensions, config.model_dimensions),
+        let model = Self {
+            data_loader,
+            epochs,
+            learning_rate,
+            classify,
+            num_heads,
+            num_layers,
+            batch_size,
+            embed_dim,
+            output_attention_weights,            
+            ff_hidden_weights,
+            ff_output_weights,
             final_output_weights,            // Initialize data-related fields
-            data: Matrix::zeros(0, config.sequence_length), // Placeholder until loaded
-            training_data: Matrix::zeros(0, config.sequence_length),
-            validation_data: Matrix::zeros(0, config.sequence_length),
-            labels: vec![],
-            training_labels: vec![],
-            validation_labels: vec![],
-            embedding_matrix: Matrix::random(config.vocab_size, config.model_dimensions),
+            embedding_matrix,
             activation_fn : activation_fn,
             derivative_fn : derivative_fn
         };
 
-        // Assign data split index based on validation split
-        model.split_index = ((1.0 - config.validation_split) * config.sequence_length as f64) as usize;
-        // Initialize weights with suitable random distributions
 
         Ok(model)
     }
@@ -124,515 +94,6 @@ impl Model {
 
     pub fn apply_derivative_fn(&self, x: f64) -> f64 {
         self.derivative_fn.apply(x)
-    }
-
-    pub fn load_data(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        match self.data_source.as_str() {
-            "file" => self.load_from_file(),
-            "redis" | "postgres" => self.load_from_db(),
-            _ => Err(format!("Unsupported data source: {}", self.data_source).into()),
-        }
-    }
-
-
-pub fn load_from_db(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-    match self.data_source.as_str() {
-        "redis" => self.load_from_redis(),
-        "postgres" => self.load_from_postgres(),
-        _ => Err(format!("Unsupported database type: {}", self.data_source).into()),
-    }
-}
-
-// Load data from Redis
-fn load_from_redis(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-    let client = redis::Client::open(self.connection_string.as_str())?;
-    let mut con = client.get_connection()?;
-
-    let keys: RedisResult<Vec<String>> = con.keys("*");
-    if keys.is_err() {
-        return Err("No keys found in Redis.".into());
-    }
-
-    let mut raw_data: Vec<Vec<f64>> = Vec::new();
-    let mut labels: Vec<f64> = Vec::new();
-    let mut categorical_values: Vec<String> = Vec::new();
-    
-    let mut row_count = 0;
-    let mut skipped_rows = 0;
-
-    for key in keys.unwrap() {
-        if self.cap_data_rows && row_count >= self.max_data_rows {
-            break;
-        }
-        let value: String = con.get(&key)?;
-        let record: Vec<String> = serde_json::from_str(&value)?;
-
-        let (valid, features, label, category) = self.process_record(&record);
-        
-        if valid {
-            raw_data.push(features);
-            labels.push(label);
-            categorical_values.push(category);
-            row_count += 1;
-        } else {
-            skipped_rows += 1;
-        }
-    }
-
-    println!(
-        "Loaded {} rows from Redis. Skipped {} invalid rows.",
-        row_count, skipped_rows
-    );
-
-    self.process_loaded_data(raw_data, labels, categorical_values)
-}
-
-// Load data from PostgreSQL
-fn load_from_postgres(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = Client::connect(self.connection_string.as_str(), NoTls)?;
-
-    let feature_columns = self.columns.features.join(", ");
-    let target_column = &self.columns.target;
-    let categorical_column = &self.columns.categorical_column;
-
-    let query = format!(
-        "SELECT {}, {}, {} FROM my_table",
-        feature_columns, target_column, categorical_column
-    );
-
-    let rows = client.query(query.as_str(), &[])?;
-
-    let mut raw_data: Vec<Vec<f64>> = Vec::new();
-    let mut labels: Vec<f64> = Vec::new();
-    let mut categorical_values: Vec<String> = Vec::new();
-
-    let mut row_count = 0;
-    let mut skipped_rows = 0;
-
-    for row in rows {
-        if self.cap_data_rows && row_count >= self.max_data_rows {
-            break;
-        }
-
-        let record: Vec<String> = (0..self.columns.features.len() + 2)
-            .map(|i| row.get::<_, String>(i))
-            .collect();
-
-        let (valid, features, label, category) = self.process_record(&record);
-
-        if valid {
-            raw_data.push(features);
-            labels.push(label);
-            categorical_values.push(category);
-            row_count += 1;
-        } else {
-            skipped_rows += 1;
-        }
-    }
-
-    println!(
-        "Loaded {} rows from PostgreSQL. Skipped {} invalid rows.",
-        row_count, skipped_rows
-    );
-
-    self.process_loaded_data(raw_data, labels, categorical_values)
-}
-
-// Process a single record (for both Redis and PostgreSQL)
-fn process_record(
-    &self,
-    record: &[String]
-) -> (bool, Vec<f64>, f64, String) {
-    let mut valid = true;
-    let mut features = Vec::new();
-    let mut errors = Vec::new();
-
-    for (i, value) in record.iter().enumerate() {
-        if i < self.columns.features.len() {
-            match value.parse::<f64>() {
-                Ok(num) => features.push(num),
-                Err(_) => {
-                    valid = false;
-                    errors.push(format!("Invalid numeric value in column {}", i));
-                }
-            }
-        }
-    }
-
-    let target_value = record[self.columns.features.len()].parse::<f64>().unwrap_or_else(|_| {
-        valid = false;
-        errors.push("Invalid target value".to_string());
-        0.0
-    });
-
-    let category_value = record[self.columns.features.len() + 1].clone();
-
-    if category_value.is_empty() {
-        valid = false;
-        errors.push("Empty value in categorical column".to_string());
-    }
-
-    if !valid {
-        println!("Skipping row due to errors: {:?}", errors);
-    }
-
-    (valid, features, target_value, category_value)
-}
-
-// Final processing of loaded data (shared for file, Redis, and Postgres)
-fn process_loaded_data(
-    &mut self,
-    mut raw_data: Vec<Vec<f64>>,
-    labels: Vec<f64>,
-    categorical_values: Vec<String>
-) -> Result<(), Box<dyn std::error::Error>> {
-    if raw_data.is_empty() {
-        return Err("No valid data to process".into());
-    }
-
-    let num_features = raw_data[0].len();
-    let mut feature_means = vec![0.0; num_features];
-    let mut feature_stds = vec![0.0; num_features];
-
-    for row in &raw_data {
-        for (i, &value) in row.iter().enumerate() {
-            feature_means[i] += value;
-        }
-    }
-    feature_means.iter_mut().for_each(|mean| *mean /= raw_data.len() as f64);
-
-    for row in &raw_data {
-        for (i, &value) in row.iter().enumerate() {
-            feature_stds[i] += (value - feature_means[i]).powi(2);
-        }
-    }
-    feature_stds.iter_mut().for_each(|std| *std = (*std / raw_data.len() as f64).sqrt());
-
-    for row in &mut raw_data {
-        for (i, value) in row.iter_mut().enumerate() {
-            *value = (*value - feature_means[i]) / feature_stds[i];
-        }
-    }
-
-    let categorical_map: std::collections::HashMap<String, usize> = categorical_values
-        .iter()
-        .cloned()
-        .enumerate()
-        .map(|(idx, value)| (value, idx))
-        .collect();
-    let categorical_indices: Vec<usize> = categorical_values
-        .iter()
-        .map(|value| *categorical_map.get(value).unwrap())
-        .collect();
-
-    let mut data: Vec<Vec<f64>> = Vec::new();
-    let mut sequence_labels: Vec<f64> = Vec::new();
-
-    for i in 0..(raw_data.len() - self.sequence_length) {
-        let mut sequence: Vec<f64> = Vec::new();
-
-        for j in 0..self.sequence_length {
-            sequence.extend(&raw_data[i + j]);
-            sequence.push(categorical_indices[i + j] as f64);
-        }
-
-        data.push(sequence);
-        sequence_labels.push(labels[i + self.sequence_length - 1]);
-    }
-
-    self.data = Matrix::new(data.len(), data[0].len(), data.into_iter().flatten().collect());
-    self.labels = sequence_labels.iter().map(|&x| x as usize).collect();
-
-    if self.validation_split > 0.0 {
-        self.split_data();
-    } else {
-        self.split_index = self.data.rows;
-        self.training_data = self.data.clone();
-        self.training_labels = self.labels.clone();
-    }
-
-    Ok(())
-}
-    pub fn load_from_file(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-
-        
-        let mut reader = ReaderBuilder::new()
-            .has_headers(true) // Assume headers are present for column names
-            .from_path(&self.data_location)?;
-
-        // Extract the feature and target columns
-        let feature_indices: Vec<usize> = reader
-            .headers()?
-            .iter()
-            .enumerate()
-            .filter(|(_, name)| self.columns.features.contains(&name.to_string()))
-            .map(|(idx, _)| idx)
-            .collect();
-
-        let target_index = reader
-            .headers()?
-            .iter()
-            .position(|name| name == &self.columns.target)
-            .ok_or("Target column not found in the data file")?;
-
-        let categorical_index = reader
-            .headers()?
-            .iter()
-            .position(|name| name == &self.columns.categorical_column)
-            .ok_or("Categorical column not found in the data file")?;
-
-        // Initialize data storage
-        let mut raw_data: Vec<Vec<f64>> = Vec::new();
-        let mut labels: Vec<f64> = Vec::new();
-        let mut categorical_values: Vec<String> = Vec::new();
-
-        let mut row_count = 0; // Track the number of rows processed
-        let mut skipped_rows = 0; // Track skipped rows
-
-        // Open a log file for errors
-        let mut error_log = std::fs::File::create("./data/error_log.csv")?;
-        writeln!(error_log, "Row,Data,Error")?;
-
-        // Read and process the data
-        for record in reader.records() {
-            if self.cap_data_rows && row_count >= self.max_data_rows {
-                break; // Stop processing if cap_data_rows is enabled and max_data_rows is reached
-            }
-
-            let record = record?;
-            row_count += 1;
-
-            // Check for missing or invalid values
-            let mut valid = true;
-            let mut errors = Vec::new();
-
-            // Validate feature columns
-            let features: Vec<f64> = feature_indices
-                .iter()
-                .map(|&idx| {
-                    record[idx]
-                        .parse::<f64>()
-                        .map_err(|_| format!("Missing or invalid value in feature column {}", idx))
-                })
-                .filter_map(|res| match res {
-                    Ok(val) => Some(val),
-                    Err(e) => {
-                        valid = false;
-                        errors.push(e);
-                        None
-                    }
-                })
-                .collect();
-
-            // Validate target column
-            let target = record[target_index].parse::<f64>().map_err(|_| {
-                valid = false;
-                format!("Missing or invalid value in target column {}", target_index)
-            });
-
-            if target.is_err() {
-                errors.push(target.unwrap_err());
-            } else {
-                labels.push(target.unwrap());
-            }
-
-            // Validate categorical column
-            if record[categorical_index].is_empty() {
-                valid = false;
-                errors.push(format!(
-                    "Missing or invalid value in categorical column {}",
-                    categorical_index
-                ));
-            } else {
-                categorical_values.push(record[categorical_index].to_string());
-            }
-
-            // Log and skip invalid rows
-            if !valid {
-                skipped_rows += 1;
-                writeln!(
-                    error_log,
-                    "{},{:?},{}",
-                    row_count,
-                    record,
-                    errors.join("; ")
-                )?;
-                continue;
-            }
-
-            // Add valid features to raw data
-            raw_data.push(features);
-        }
-
-        println!(
-            "Processed {} rows. Skipped {} invalid rows.",
-            row_count, skipped_rows
-        );
-
-        if raw_data.is_empty() {
-            return Err("No valid data to process".into());
-        }
-
-        // Normalize features dynamically (z-score normalization)
-        let num_features = raw_data[0].len();
-        let mut feature_means = vec![0.0; num_features];
-        let mut feature_stds = vec![0.0; num_features];
-
-        // Calculate mean and standard deviation for each feature
-        for row in &raw_data {
-            for (i, &value) in row.iter().enumerate() {
-                feature_means[i] += value;
-            }
-        }
-        feature_means.iter_mut().for_each(|mean| *mean /= raw_data.len() as f64);
-
-        for row in &raw_data {
-            for (i, &value) in row.iter().enumerate() {
-                feature_stds[i] += (value - feature_means[i]).powi(2);
-            }
-        }
-        feature_stds.iter_mut().for_each(|std| *std = (*std / raw_data.len() as f64).sqrt());
-
-        // Apply z-score normalization
-        for row in &mut raw_data {
-            for (i, value) in row.iter_mut().enumerate() {
-                *value = (*value - feature_means[i]) / feature_stds[i];
-            }
-        }
-
-        // Handle categorical column (e.g., embedding or one-hot encoding)
-        let categorical_map: std::collections::HashMap<String, usize> = categorical_values
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(idx, value)| (value, idx))
-            .collect();
-        let categorical_indices: Vec<usize> = categorical_values
-            .iter()
-            .map(|value| *categorical_map.get(value).unwrap())
-            .collect();
-
-        // Create sequences
-        let mut data: Vec<Vec<f64>> = Vec::new();
-        let mut sequence_labels: Vec<f64> = Vec::new();
-
-        for i in 0..(raw_data.len() - self.sequence_length) {
-            let mut sequence: Vec<f64> = Vec::new();
-
-            for j in 0..self.sequence_length {
-                sequence.extend(&raw_data[i + j]); // Add features
-                sequence.push(categorical_indices[i + j] as f64); // Add categorical index
-            }
-
-            data.push(sequence);
-            sequence_labels.push(labels[i + self.sequence_length - 1]); // Use last value in sequence
-        }
-
-        // Convert data to Matrix format
-        self.data = Matrix::new(data.len(), data[0].len(), data.into_iter().flatten().collect());
-        self.labels = sequence_labels.iter().map(|&x| x as usize).collect();
-
-        if self.validation_split > 0.0 {
-            self.split_data();
-        } else {
-            // No split, assign all data to training
-            self.split_index = self.data.rows;
-            self.training_data = self.data.clone();
-            self.training_labels = self.labels.clone();
-        }
-
-        Ok(())
-    }
-
-
-    pub fn shuffle_data(data: &mut Matrix, labels: &mut Vec<usize>) {
-        println!("Shuffling data...");
-
-        // Verify input alignment
-        assert_eq!(
-            data.rows,
-            labels.len(),
-            "Mismatch: data rows ({}) != labels length ({})",
-            data.rows,
-            labels.len()
-        );
-
-        // Generate shuffled indices
-        let mut indices: Vec<usize> = (0..data.rows).collect();
-        let mut rng = rand::thread_rng();
-        indices.shuffle(&mut rng);
-
-        // Create new shuffled matrices and labels
-        let mut shuffled_data = Matrix::zeros(data.rows, data.cols);
-        let mut shuffled_labels = Vec::with_capacity(labels.len());
-
-        for (new_idx, &original_idx) in indices.iter().enumerate() {
-            // Copy row-by-row from the original data matrix
-            for col in 0..data.cols {
-                shuffled_data.data[new_idx * data.cols + col] =
-                    data.data[original_idx * data.cols + col];
-            }
-
-            // Copy corresponding label
-            shuffled_labels.push(labels[original_idx]);
-        }
-
-        // Debug shuffled data and labels
-        println!(
-            "Before shuffling: First 5 labels = {:?}",
-            &labels[..5]
-        );
-        println!(
-            "After shuffling: First 5 labels = {:?}",
-            &shuffled_labels[..5]
-        );
-
-        // Update the data matrix and labels
-        *data = shuffled_data;
-        *labels = shuffled_labels;
-
-        println!("Shuffling complete.");
-    }
-
-    pub fn split_data(&mut self) {
-
-        println!("Splitting data...");
-
-        // Dynamically calculate split index based on validation_split
-        self.split_index = ((1.0 - self.validation_split) * self.data.rows as f64) as usize;
-
-        // Ensure split_index is valid
-        assert!(
-            self.split_index > 0 && self.split_index < self.data.rows,
-            "Invalid split_index: {}. Ensure validation_split is correctly set.",
-            self.split_index
-        );
-
-        // Split data into training and validation sets
-        let data_cols = self.data.cols;
-
-        // Extract rows for training data
-        self.training_data = Matrix::new(
-            self.split_index,
-            data_cols,
-            self.data.data[..(self.split_index * data_cols)].to_vec(),
-        );
-
-        // Extract rows for validation data
-        self.validation_data = Matrix::new(
-            self.data.rows - self.split_index,
-            data_cols,
-            self.data.data[(self.split_index * data_cols)..].to_vec(),
-        );
-
-        // Split labels into training and validation sets
-        self.training_labels = self.labels[..self.split_index].to_vec();
-        self.validation_labels = self.labels[self.split_index..].to_vec();
-
-        println!(
-            "Data split into training ({}) and validation ({}) sets.",
-            self.training_data.rows, self.validation_data.rows
-        );
     }
 
     //  computes query (Q), key (K), and value (V) matrices, and applies the attention formula:
@@ -852,40 +313,37 @@ fn process_loaded_data(
 
 
     pub fn train(&mut self) {
-    if self.classify {
-        self.train_classification();
-    } else {
-        self.train_regression();
+
+        if self.classify {
+            self.train_classification();
+        } else {
+            self.train_regression();
+        }
     }
-}
 
     pub fn print_config(&self) {
         println!("Model Configuration:");
         println!("  Epochs: {}", self.epochs);
         println!("  Learning Rate: {:.5}", self.learning_rate);
         println!("  Batch Size: {}", self.batch_size);
-        println!("  Sequence Length: {}", self.sequence_length);
-        println!("  Validation Split: {:.2}%", self.validation_split * 100.0);
-        println!("  Split Index: {}", self.split_index);
-        println!("  Shuffle Data: {}", self.shuffle_data);
+        println!("  Sequence Length: {}", self.data_loader.sequence_length);
+        println!("  Validation Split: {:.2}%", self.data_loader.validation_split * 100.0);
+        println!("  Split Index: {}", self.data_loader.split_index);
         println!("  Number of Layers: {}", self.num_layers);
         println!("  Number of Heads: {}", self.num_heads);
         println!("  Embedding Dimension: {}", self.embed_dim);
-        println!("  Vocabulary Size: {}", self.vocab_size);
-        println!("  Data Location: {}", self.data_location);
+        println!("  Data Location: {}", self.data_loader.data_location);
 
         // Data dimensions
-        println!("  Data Matrix: {} rows x {} cols", self.data.rows, self.data.cols);
-        println!("  Training Data: {} rows x {} cols", self.training_data.rows, self.training_data.cols);
-        if self.cap_data_rows {
+        println!("  Training Data: {} rows x {} cols", self.data_loader.training_data.rows, self.data_loader.training_data.cols);
+        if self.data_loader.cap_data_rows {
             println!("  Capped for debugging for this run");
         }
 
-        println!("  Validation Data: {} rows x {} cols", self.validation_data.rows, self.validation_data.cols);
+        println!("  Validation Data: {} rows x {} cols", self.data_loader.validation_data.rows, self.data_loader.validation_data.cols);
         // Labels info
-        println!("  Labels: {} total", self.labels.len());
-        println!("  Training Labels: {} total", self.training_labels.len());
-        println!("  Validation Labels: {} total", self.validation_labels.len());
+        println!("  Training Labels: {} total", self.data_loader.training_labels.len());
+        println!("  Validation Labels: {} total", self.data_loader.validation_labels.len());
 
         // Check attention weights
         println!("  Attention Weights: {} heads", self.output_attention_weights.len());
@@ -916,9 +374,8 @@ fn process_loaded_data(
     pub fn train_classification(&mut self) {
         // Track training time
         let start_time = Instant::now();
-
         // Progress bar setup
-        let iterations: u64 = (self.epochs * (self.training_data.rows / self.batch_size)) as u64;
+        let iterations: u64 = (self.epochs * (self.data_loader.training_data.rows / self.batch_size)) as u64;
         let pb = ProgressBar::new(iterations);
         pb.set_style(ProgressStyle::default_bar()
             .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
@@ -930,12 +387,12 @@ fn process_loaded_data(
             let mut correct_predictions = 0;
 
             // Shuffle training data and labels
-            Model::shuffle_data(&mut self.training_data, &mut self.training_labels);
+            DataLoader::shuffle_data(&mut self.data_loader.training_data, &mut self.data_loader.training_labels);
 
-            for i in (0..self.training_data.rows).step_by(self.batch_size) {
+            for i in (0..self.data_loader.training_data.rows).step_by(self.batch_size) {
                 // Prepare a batch of data
-                let batch_data = self.training_data.slice(i, i + self.batch_size);
-                let batch_labels = &self.training_labels[i..(i + self.batch_size).min(self.training_labels.len())];
+                let batch_data = self.data_loader.training_data.slice(i, i + self.batch_size);
+                let batch_labels = &self.data_loader.training_labels[i..(i + self.batch_size).min(self.data_loader.training_labels.len())];
 
                 // Forward pass
                 let predictions = self.forward_transformer(&batch_data);
@@ -971,12 +428,12 @@ fn process_loaded_data(
                 pb.inc(1);
             }
 
-            let accuracy = correct_predictions as f64 / self.training_data.rows as f64 * 100.0;
+            let accuracy = correct_predictions as f64 / self.data_loader.training_data.rows as f64 * 100.0;
             println!(
                 "Epoch {}/{} - Loss: {:.4}, Accuracy: {:.2}%",
                 epoch + 1,
                 self.epochs,
-                total_loss / self.training_data.rows as f64,
+                total_loss / self.data_loader.training_data.rows as f64,
                 accuracy
             );
         }
@@ -993,7 +450,7 @@ fn process_loaded_data(
         let start_time = Instant::now();
 
         // Progress bar setup
-        let iterations: u64 = (self.epochs * (self.training_data.rows / self.batch_size)) as u64;
+        let iterations: u64 = (self.epochs * (self.data_loader.training_data.rows / self.batch_size)) as u64;
         let pb = ProgressBar::new(iterations);
         pb.set_style(ProgressStyle::default_bar()
             .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
@@ -1004,12 +461,12 @@ fn process_loaded_data(
             let mut total_loss = 0.0;
 
             // Shuffle training data and labels
-            Model::shuffle_data(&mut self.training_data, &mut self.training_labels);
+            DataLoader::shuffle_data(&mut self.data_loader.training_data, &mut self.data_loader.training_labels);
 
-            for i in (0..self.training_data.rows).step_by(self.batch_size) {
+            for i in (0..self.data_loader.training_data.rows).step_by(self.batch_size) {
                 // Prepare a batch of data
-                let batch_data = self.training_data.slice(i, i + self.batch_size);
-                let batch_labels = &self.training_labels[i..(i + self.batch_size).min(self.training_labels.len())];
+                let batch_data = self.data_loader.training_data.slice(i, i + self.batch_size);
+                let batch_labels = &self.data_loader.training_labels[i..(i + self.batch_size).min(self.data_loader.training_labels.len())];
 
                 // Forward pass
                 let predictions = self.forward_transformer(&batch_data);
@@ -1046,7 +503,7 @@ fn process_loaded_data(
                 "Epoch {}/{} - Loss: {:.4}",
                 epoch + 1,
                 self.epochs,
-                total_loss / self.training_data.rows as f64
+                total_loss / self.data_loader.training_data.rows as f64
             );
         }
 

@@ -1,7 +1,9 @@
-
 use serde::Deserialize;
+use std::fs::File;
+use std::io::{BufReader, Error as IoError};
+use serde_json::from_reader;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct Config {
     pub data_source:String,
     pub connection_string:String,
@@ -26,11 +28,18 @@ pub struct Config {
     pub activation_lambda:f64,
 }
 
-#[derive(Deserialize)]
-#[derive(Debug)] 
+#[derive(Deserialize,Debug, Clone)] 
 pub struct ColumnsConfig {
     pub features: Vec<String>,
     pub target: String,
     pub categorical_column: String,
 }
 
+impl Config {
+    pub fn from_json(path: &str) -> Result<Self, IoError> {
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+        let config = from_reader(reader)?;
+        Ok(config)
+    }
+}
