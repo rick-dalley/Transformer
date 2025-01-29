@@ -12,6 +12,8 @@ use crate::data_loader::DataLoader;
 use serde::{Serialize, Deserialize};
 use std::fs::File;
 use std::io::Write;
+use std::fs::OpenOptions;
+use plotters::prelude::*;
 
 // Model
 pub struct Model<'a> {
@@ -474,6 +476,8 @@ impl<'a> Model<'a> {
     pub fn train_regression(&mut self) {
         // Track training time
         let start_time = Instant::now();
+        let mut loss_history: Vec<f64> = Vec::new();
+        let mut accuracy_history: Vec<f64> = Vec::new();
 
         // Progress bar setup
         let iterations: u64 = (self.epochs * (self.data_loader.training_data.rows / self.batch_size)) as u64;
@@ -485,6 +489,8 @@ impl<'a> Model<'a> {
 
         for epoch in 0..self.epochs {
             let mut total_loss = 0.0;
+            let mut correct_predictions = 0;
+            let mut total_samples = 0;
 
             // Shuffle training data and labels
             DataLoader::shuffle_data(&mut self.data_loader.training_data, &mut self.data_loader.training_labels);
@@ -514,6 +520,15 @@ impl<'a> Model<'a> {
                 }
                 total_loss += batch_loss;
 
+                // Accuracy calculation
+                let correct_count: usize = outputs
+                    .rows_iter()
+                    .zip(batch_labels.iter())
+                    .filter(|(predicted, &true_label)| Matrix::argmax_row(*predicted) == true_label)
+                    .count();
+                correct_predictions += correct_count;
+                total_samples += batch_labels.len();
+
                 // Backward pass
                 let output_errors = &outputs - &target_batch;
                 let expanded_output_errors = output_errors.repeat_columns(self.embed_dim);
@@ -528,23 +543,65 @@ impl<'a> Model<'a> {
             // check if it's time to do a check point
             if epoch % self.checkpoint == 0 {
                 println!("Saving...");
-                self.save_checkpoint("model_checkpoint.json").expect("Failed to save model.");
+                self.save_checkpoint("./data/model_checkpoint.json").expect("Failed to save model.");
             }
 
+            let avg_loss = total_loss / self.data_loader.training_data.rows as f64;
+            let accuracy = (correct_predictions as f64 / total_samples as f64) * 100.0; // Percentage
 
-            println!(
-                "Epoch {}/{} - Loss: {:.4}",
-                epoch + 1,
-                self.epochs,
-                total_loss / self.data_loader.training_data.rows as f64
-            );
+
+            loss_history.push(avg_loss);
+            accuracy_history.push(accuracy);
+
+            // Log the loss for this epoch
+            Model::log_training_metrics(epoch, avg_loss, accuracy);
+
+            println!("Epoch {}/{} - Loss: {:.4}", epoch + 1, self.epochs, avg_loss);
+
         }
 
+        Model::plot_loss_curve(loss_history, "./data/loss_plot.png").expect("Failed to generate loss plot");
         let elapsed_time = start_time.elapsed();
         println!(
             "\nTraining completed in {:.2?} (hh:mm:ss.milliseconds)",
             elapsed_time
         );
     }
+
+
+    // log training metrics
+    fn log_training_metrics(epoch: usize, loss: f64, accuracy: f64) {
+        let mut file = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open("./data/training_log.csv")
+            .expect("Failed to open log file");
+
+        writeln!(file, "{},{},{}", epoch, loss, accuracy).expect("Failed to write log.");
+    }
+
+    // plot loss curve
+    fn plot_loss_curve(loss_values: Vec<f64>, location:&str) -> Result<(), Box<dyn std::error::Error>> {
+        let root = BitMapBackend::new(&location, (800, 600)).into_drawing_area();
+        root.fill(&WHITE)?;
+
+        let mut chart = ChartBuilder::on(&root)
+            .caption("Loss Curve", ("sans-serif", 50))
+            .build_cartesian_2d(0..loss_values.len(), 0.0..loss_values.iter().cloned().fold(f64::INFINITY, f64::min))?;
+
+        chart.draw_series(LineSeries::new(
+            loss_values.iter().enumerate().map(|(i, &loss)| (i, loss)),
+            &BLUE,
+        ))?;
+
+        Ok(())
+    }
+
+    // predict
+    pub fn predict(&self, input: &Matrix) -> Matrix {
+        let transformed = self.forward_transformer(input);
+        self.output_layer(&transformed)
+    }
+
 
 }
