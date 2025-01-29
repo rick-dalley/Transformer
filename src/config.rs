@@ -3,7 +3,8 @@ use serde::Deserialize;
 
 #[derive(Deserialize)]
 pub struct Config {
-    pub data_file: String,
+    pub data_source:String,
+    pub location: String,
     pub cap_data_rows: bool,
     pub max_data_rows: usize,
     pub epochs: usize,

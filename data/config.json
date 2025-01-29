@@ -1,7 +1,8 @@
 {
-  "data_file": "/Users/richarddalley/Code/Rust/Transformer/data/all_stocks_5yr.csv",
+  "data_source": "file",
+  "location": "/Users/richarddalley/Code/Rust/Transformer/data/all_stocks_5yr.csv",
   "cap_data_rows": true,
-  "max_data_rows": 100000,
+  "max_data_rows": 1260,
   "epochs": 1,
   "learning_rate": 0.3,
   "vocab_size": 10000,

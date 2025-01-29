@@ -25,6 +25,7 @@ pub struct Model {
     sequence_length: usize,
     split_index: usize,
     batch_size: usize,
+    data_source: String, 
     data_location: String,
     num_layers: usize, 
     num_heads: usize, 
@@ -83,7 +84,8 @@ impl Model {
             num_layers: config.num_layers,
             batch_size: config.batch_size,
             embed_dim: config.model_dimensions,
-            data_location: config.data_file.clone(),
+            data_source: config.data_source.clone(),
+            data_location: config.location.clone(),
             split_index: 0, // To be calculated during data processing
             sequence_length: config.sequence_length,
             columns: config.columns,
@@ -155,7 +157,7 @@ impl Model {
         let mut skipped_rows = 0; // Track skipped rows
 
         // Open a log file for errors
-        let mut error_log = std::fs::File::create("error_log.csv")?;
+        let mut error_log = std::fs::File::create("./data/error_log.csv")?;
         writeln!(error_log, "Row,Data,Error")?;
 
         // Read and process the data
