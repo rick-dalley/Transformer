@@ -2,3 +2,4 @@
 data/all_stocks_5yr.csv
 data/error_log.csv
 data/archive
+data/model_checkpoint.json
