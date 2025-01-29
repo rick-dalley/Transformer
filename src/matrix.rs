@@ -216,6 +216,20 @@ impl Matrix {
         }
     }
 
+    pub fn repeat_columns(&self, target_cols: usize) -> Matrix {
+        assert_eq!(self.cols, 1, "repeat_columns only supports single-column matrices");
+
+        let mut repeated_data = Vec::with_capacity(self.rows * target_cols);
+
+        for i in 0..self.rows {
+            let value = self.data[i]; // Get the single value for this row
+            repeated_data.extend(std::iter::repeat(value).take(target_cols)); // Repeat it target_cols times
+        }
+
+        Matrix::new(self.rows, target_cols, repeated_data)
+    }
+
+
     /// Creates a one-hot encoded matrix from a set of labels.
     ///
     /// # Arguments
@@ -231,8 +245,17 @@ impl Matrix {
         let mut data = vec![0.0; rows * cols];
 
         for (i, &label) in labels.iter().enumerate() {
-            assert!(label < num_classes, "Label index out of bounds");
-            data[i * cols + label] = 1.0;
+            let clamped_label = if label >= num_classes {
+            println!(
+                "Warning: Label index out of bounds. i={}, label={}, num_classes={}, rows={}, cols={}. Clamping label to {}.",
+                i, label, num_classes, rows, cols, num_classes - 1
+            );
+            num_classes - 1 // Clamp to the maximum valid label
+        } else {
+            label
+        };
+            // assert!(label < num_classes, "Label index out of bounds");
+            data[i * cols + clamped_label] = 1.0;
         }
 
         Matrix {

@@ -3,22 +3,23 @@
 
 use crate::activation_functions::{self};
 use crate::matrix::{Matrix, Dot};
-
+use std::io::Write;
 use std::fs::File;
 use std::io::BufReader;
 use serde_json::from_reader;
 use csv::ReaderBuilder;
 use rand::seq::SliceRandom;
 use std::time::Instant;
-use std::io::{self, Write};
 use crate::config;
+use indicatif::{ProgressBar, ProgressStyle};
+
 // Model
 pub struct Model {
     epochs: usize,
-    show_progress: bool,
     cap_data_rows: bool,
     max_data_rows: usize,
     learning_rate: f64,
+    classify: bool,
     shuffle_data: bool,
     validation_split: f64,
     sequence_length: usize,
@@ -43,7 +44,6 @@ pub struct Model {
     validation_labels: Vec<usize>,
     activation_fn: Box<dyn activation_functions::ActivationTrait>,
     derivative_fn: Box<dyn activation_functions::ActivationTrait>,
-
 }
 
 
@@ -58,9 +58,16 @@ impl Model {
 
         // Parse the JSON into a Config struct
         let config: config::Config = from_reader(reader)?;
-
+        let num_classes = 6;
 
         let (activation_fn, derivative_fn) = activation_functions::get_activation_and_derivative(&config);
+        let final_output_weights = if config.classify {
+            // For classification, the number of classes defines the output size
+            Matrix::random(config.model_dimensions, num_classes)
+        } else {
+            // For regression, the output size is always 1
+            Matrix::random(config.model_dimensions, 1)
+        };
 
         // Initialize the Model struct
         let mut model = Self {
@@ -68,6 +75,7 @@ impl Model {
             cap_data_rows:config.cap_data_rows,
             max_data_rows: config.max_data_rows,
             learning_rate: config.learning_rate,
+            classify: config.classify,
             shuffle_data: config.shuffle_data,
             vocab_size: config.vocab_size,
             validation_split: config.validation_split,
@@ -84,7 +92,7 @@ impl Model {
                 .collect(),            
             ff_hidden_weights: Matrix::random(config.model_dimensions, config.hidden_dimensions),
             ff_output_weights: Matrix::random(config.hidden_dimensions, config.model_dimensions),
-            final_output_weights: Matrix::zeros(config.model_dimensions, config.model_dimensions),            // Initialize data-related fields
+            final_output_weights,            // Initialize data-related fields
             data: Matrix::zeros(0, config.sequence_length), // Placeholder until loaded
             training_data: Matrix::zeros(0, config.sequence_length),
             validation_data: Matrix::zeros(0, config.sequence_length),
@@ -92,7 +100,6 @@ impl Model {
             training_labels: vec![],
             validation_labels: vec![],
             embedding_matrix: Matrix::random(config.vocab_size, config.model_dimensions),
-            show_progress: config.show_progress,
             activation_fn : activation_fn,
             derivative_fn : derivative_fn
         };
@@ -145,6 +152,11 @@ impl Model {
         let mut categorical_values: Vec<String> = Vec::new();
 
         let mut row_count = 0; // Track the number of rows processed
+        let mut skipped_rows = 0; // Track skipped rows
+
+        // Open a log file for errors
+        let mut error_log = std::fs::File::create("error_log.csv")?;
+        writeln!(error_log, "Row,Data,Error")?;
 
         // Read and process the data
         for record in reader.records() {
@@ -153,23 +165,79 @@ impl Model {
             }
 
             let record = record?;
+            row_count += 1;
 
-            // Extract features
+            // Check for missing or invalid values
+            let mut valid = true;
+            let mut errors = Vec::new();
+
+            // Validate feature columns
             let features: Vec<f64> = feature_indices
                 .iter()
-                .map(|&idx| record[idx].parse::<f64>().unwrap_or(0.0))
+                .map(|&idx| {
+                    record[idx]
+                        .parse::<f64>()
+                        .map_err(|_| format!("Missing or invalid value in feature column {}", idx))
+                })
+                .filter_map(|res| match res {
+                    Ok(val) => Some(val),
+                    Err(e) => {
+                        valid = false;
+                        errors.push(e);
+                        None
+                    }
+                })
                 .collect();
 
-            // Extract target
-            let target: f64 = record[target_index].parse::<f64>()?;
-            labels.push(target);
+            // Validate target column
+            let target = record[target_index].parse::<f64>().map_err(|_| {
+                valid = false;
+                format!("Missing or invalid value in target column {}", target_index)
+            });
 
-            // Extract categorical value
-            categorical_values.push(record[categorical_index].to_string());
+            if target.is_err() {
+                errors.push(target.unwrap_err());
+            } else {
+                labels.push(target.unwrap());
+            }
 
+            // Validate categorical column
+            if record[categorical_index].is_empty() {
+                valid = false;
+                errors.push(format!(
+                    "Missing or invalid value in categorical column {}",
+                    categorical_index
+                ));
+            } else {
+                categorical_values.push(record[categorical_index].to_string());
+            }
+
+            // Log and skip invalid rows
+            if !valid {
+                skipped_rows += 1;
+                writeln!(
+                    error_log,
+                    "{},{:?},{}",
+                    row_count,
+                    record,
+                    errors.join("; ")
+                )?;
+                continue;
+            }
+
+            // Add valid features to raw data
             raw_data.push(features);
-            row_count += 1; // Increment the row count
         }
+
+        println!(
+            "Processed {} rows. Skipped {} invalid rows.",
+            row_count, skipped_rows
+        );
+
+        if raw_data.is_empty() {
+            return Err("No valid data to process".into());
+        }
+
         // Normalize features dynamically (z-score normalization)
         let num_features = raw_data[0].len();
         let mut feature_means = vec![0.0; num_features];
@@ -229,7 +297,6 @@ impl Model {
         self.data = Matrix::new(data.len(), data[0].len(), data.into_iter().flatten().collect());
         self.labels = sequence_labels.iter().map(|&x| x as usize).collect();
 
-
         if self.validation_split > 0.0 {
             self.split_data();
         } else {
@@ -242,38 +309,58 @@ impl Model {
         Ok(())
     }
 
-    pub fn shuffle_data(&mut self) {
+
+    pub fn shuffle_data(data: &mut Matrix, labels: &mut Vec<usize>) {
         println!("Shuffling data...");
 
+        // Verify input alignment
+        assert_eq!(
+            data.rows,
+            labels.len(),
+            "Mismatch: data rows ({}) != labels length ({})",
+            data.rows,
+            labels.len()
+        );
+
         // Generate shuffled indices
-        let mut indices: Vec<usize> = (0..self.data.rows).collect();
+        let mut indices: Vec<usize> = (0..data.rows).collect();
         let mut rng = rand::thread_rng();
         indices.shuffle(&mut rng);
 
         // Create new shuffled matrices and labels
-        let mut shuffled_data = Matrix::zeros(self.data.rows, self.data.cols);
-        let mut shuffled_labels = Vec::with_capacity(self.labels.len());
+        let mut shuffled_data = Matrix::zeros(data.rows, data.cols);
+        let mut shuffled_labels = Vec::with_capacity(labels.len());
 
-        // Reorder data and labels based on shuffled indices
         for (new_idx, &original_idx) in indices.iter().enumerate() {
             // Copy row-by-row from the original data matrix
-            for col in 0..self.data.cols {
-                shuffled_data.data[new_idx * self.data.cols + col] =
-                    self.data.data[original_idx * self.data.cols + col];
+            for col in 0..data.cols {
+                shuffled_data.data[new_idx * data.cols + col] =
+                    data.data[original_idx * data.cols + col];
             }
 
             // Copy corresponding label
-            shuffled_labels.push(self.labels[original_idx]);
+            shuffled_labels.push(labels[original_idx]);
         }
 
-        // Update the data matrix and labels with shuffled versions
-        self.data = shuffled_data;
-        self.labels = shuffled_labels;
+        // Debug shuffled data and labels
+        println!(
+            "Before shuffling: First 5 labels = {:?}",
+            &labels[..5]
+        );
+        println!(
+            "After shuffling: First 5 labels = {:?}",
+            &shuffled_labels[..5]
+        );
 
-        println!("Data and labels shuffled.");
+        // Update the data matrix and labels
+        *data = shuffled_data;
+        *labels = shuffled_labels;
+
+        println!("Shuffling complete.");
     }
 
     pub fn split_data(&mut self) {
+
         println!("Splitting data...");
 
         // Dynamically calculate split index based on validation_split
@@ -450,11 +537,20 @@ impl Model {
 }
 
     pub fn update_weights(&mut self, gradients: &Matrix, learning_rate: f64) {
-        // Aggregate gradients across the batch to match weight dimensions
-        let aggregated_gradients = gradients.mean_axis(0); // Collapse rows (result: 1 x 512)
+        // Aggregate gradients across the batch
+        let aggregated_gradients = gradients.mean_axis(0); // (1, 512)
 
-        // Apply weight updates
-        self.final_output_weights -= aggregated_gradients.broadcast(self.final_output_weights.rows) * learning_rate;
+        if self.classify {
+            // Classification: Final output weights are (512, num_classes)
+            // Expand gradients to match (512, num_classes)
+            let expanded_gradients = aggregated_gradients.broadcast(self.final_output_weights.cols); // (512, num_classes)
+            self.final_output_weights -= expanded_gradients * learning_rate;
+        } else {
+            // Regression: Final output weights are (512, 1)
+            // Transpose to match (512, 1)
+            let transposed_gradients = aggregated_gradients.transpose(); // (512, 1)
+            self.final_output_weights -= transposed_gradients * learning_rate;
+        }
     }
 
     // backward_transformer
@@ -479,14 +575,14 @@ impl Model {
     }
 
     fn backward_feedforward(&self, gradients: &Matrix) -> Matrix {
-    // Derivatives through the second linear layer
-    let grad_ff_output_weights = gradients.dot(&self.ff_hidden_weights);
-    
-    // Backpropagate activation function using the stored activation derivative function
-    let grad_hidden = grad_ff_output_weights.apply(|x| self.apply_derivative_fn(x));
+        // Derivatives through the second linear layer
+        let grad_ff_output_weights = gradients.dot(&self.ff_hidden_weights);
+        
+        // Backpropagate activation function using the stored activation derivative function
+        let grad_hidden = grad_ff_output_weights.apply(|x| self.apply_derivative_fn(x));
 
-    grad_hidden.dot(&self.ff_hidden_weights.transpose())
-}
+        grad_hidden.dot(&self.ff_hidden_weights.transpose())
+    }
 
     fn backward_multi_head_attention(
         &self,
@@ -519,90 +615,14 @@ impl Model {
         attention_gradients
     }
 
+
     pub fn train(&mut self) {
-        let start_time = Instant::now(); // Track training time
-
-        for epoch in 0..self.epochs {
-            let mut total_loss = 0.0;
-            let mut correct_predictions = 0;
-
-            // Shuffle training data at the start of each epoch
-            self.shuffle_data();
-
-            for i in (0..self.training_data.rows).step_by(self.batch_size) {
-                // Prepare a batch of data
-                let batch_data = self.training_data.slice(i, i + self.batch_size);
-                let batch_labels = &self.training_labels[i..(i + self.batch_size).min(self.training_labels.len())];
-
-                // Forward pass: transformer layers + output layer
-                let predictions = self.forward_transformer(&batch_data);
-                let outputs = self.output_layer(&predictions);
-
-                // Compute loss (e.g., mean squared error)
-                let mut batch_loss = 0.0;
-
-                // Precompute target batch
-                let target_batch = Matrix::from_labels(batch_labels, outputs.cols); 
-                for (predicted_row, target_row) in outputs.rows_iter().zip(target_batch.rows_iter()) {
-                    batch_loss += predicted_row
-                        .iter()
-                        .zip(target_row.iter())
-                        .map(|(p, t)| (p - t).powi(2))
-                        .sum::<f64>() / outputs.cols as f64; // Mean Squared Error
-                }
-
-                total_loss += batch_loss;
-
-                // Backward pass: calculate errors
-                let output_errors = &outputs - &Matrix::from_labels(batch_labels, outputs.cols);
-                let predictions_clone = predictions.clone();
-                let attention_errors = self.backward_transformer(&predictions_clone, &output_errors);
-
-                // === Resolve Immutable Borrow ===
-                let correct_count: usize = outputs
-                    .rows_iter()
-                    .zip(batch_labels.iter()) // Resolve this borrow now
-                    .filter(|(predicted, &true_label)| Matrix::argmax_row(*predicted) == true_label)
-                    .count();
-                
-                correct_predictions += correct_count; // Done with `batch_labels` here
-
-                // === Perform Mutable Borrow After Immutable Borrow Ends ===
-                self.update_weights(&attention_errors, self.learning_rate); // No conflicts now
-
-                // Show progress
-                if self.show_progress  {
-                    if i > 0{
-                        if i % 10000 == 0{
-                            print!(" ");
-                            io::stdout().flush().unwrap();
-                        } else if i % 1000 == 0{
-                            print!("*");
-                            io::stdout().flush().unwrap();
-                        }
-
-                    }
-                }
-            }
-
-            // Metrics for the epoch
-            let accuracy = correct_predictions as f64 / self.training_data.rows as f64 * 100.0;
-            println!(
-                "Epoch {}/{} - Loss: {:.4}, Accuracy: {:.2}%",
-                epoch + 1,
-                self.epochs,
-                total_loss / self.training_data.rows as f64,
-                accuracy
-            );
-        }
-
-        // Training completed
-        let elapsed_time = start_time.elapsed();
-        println!(
-            "\nTraining completed in {:.2?} (hh:mm:ss.milliseconds)",
-            elapsed_time
-        );
+    if self.classify {
+        self.train_classification();
+    } else {
+        self.train_regression();
     }
+}
 
     pub fn print_config(&self) {
         println!("Model Configuration:");
@@ -655,6 +675,150 @@ impl Model {
         println!(
             "  Final Output Weights: {} rows x {} cols",
             self.final_output_weights.rows, self.final_output_weights.cols
+        );
+    }
+
+    pub fn train_classification(&mut self) {
+        // Track training time
+        let start_time = Instant::now();
+
+        // Progress bar setup
+        let iterations: u64 = (self.epochs * (self.training_data.rows / self.batch_size)) as u64;
+        let pb = ProgressBar::new(iterations);
+        pb.set_style(ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+            .unwrap()
+            .progress_chars("#>-"));
+
+        for epoch in 0..self.epochs {
+            let mut total_loss = 0.0;
+            let mut correct_predictions = 0;
+
+            // Shuffle training data and labels
+            Model::shuffle_data(&mut self.training_data, &mut self.training_labels);
+
+            for i in (0..self.training_data.rows).step_by(self.batch_size) {
+                // Prepare a batch of data
+                let batch_data = self.training_data.slice(i, i + self.batch_size);
+                let batch_labels = &self.training_labels[i..(i + self.batch_size).min(self.training_labels.len())];
+
+                // Forward pass
+                let predictions = self.forward_transformer(&batch_data);
+                let outputs = self.output_layer(&predictions);
+
+                // Compute classification loss
+                let target_batch = Matrix::from_labels(batch_labels, outputs.cols);
+                let mut batch_loss = 0.0;
+                for (predicted_row, target_row) in outputs.rows_iter().zip(target_batch.rows_iter()) {
+                    batch_loss += predicted_row
+                        .iter()
+                        .zip(target_row.iter())
+                        .map(|(p, t)| (p - t).powi(2))
+                        .sum::<f64>() / outputs.cols as f64;
+                }
+                total_loss += batch_loss;
+
+                // Accuracy calculation
+                let correct_count: usize = outputs
+                    .rows_iter()
+                    .zip(batch_labels.iter())
+                    .filter(|(predicted, &true_label)| Matrix::argmax_row(*predicted) == true_label)
+                    .count();
+                correct_predictions += correct_count;
+
+                // Backward pass
+                let output_errors = &outputs - &target_batch;
+                let predictions_clone = predictions.clone();
+                let attention_errors = self.backward_transformer(&predictions_clone, &output_errors);
+                self.update_weights(&attention_errors, self.learning_rate);
+
+                // Update progress bar
+                pb.inc(1);
+            }
+
+            let accuracy = correct_predictions as f64 / self.training_data.rows as f64 * 100.0;
+            println!(
+                "Epoch {}/{} - Loss: {:.4}, Accuracy: {:.2}%",
+                epoch + 1,
+                self.epochs,
+                total_loss / self.training_data.rows as f64,
+                accuracy
+            );
+        }
+
+        let elapsed_time = start_time.elapsed();
+        println!(
+            "\nTraining completed in {:.2?} (hh:mm:ss.milliseconds)",
+            elapsed_time
+        );
+    }
+
+    pub fn train_regression(&mut self) {
+        // Track training time
+        let start_time = Instant::now();
+
+        // Progress bar setup
+        let iterations: u64 = (self.epochs * (self.training_data.rows / self.batch_size)) as u64;
+        let pb = ProgressBar::new(iterations);
+        pb.set_style(ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+            .unwrap()
+            .progress_chars("#>-"));
+
+        for epoch in 0..self.epochs {
+            let mut total_loss = 0.0;
+
+            // Shuffle training data and labels
+            Model::shuffle_data(&mut self.training_data, &mut self.training_labels);
+
+            for i in (0..self.training_data.rows).step_by(self.batch_size) {
+                // Prepare a batch of data
+                let batch_data = self.training_data.slice(i, i + self.batch_size);
+                let batch_labels = &self.training_labels[i..(i + self.batch_size).min(self.training_labels.len())];
+
+                // Forward pass
+                let predictions = self.forward_transformer(&batch_data);
+                let outputs = self.output_layer(&predictions);
+
+                // Compute regression loss (MSE)
+                let target_batch = Matrix::new(
+                    batch_labels.len(),
+                    1, // Single column for regression
+                    batch_labels.iter().map(|&x| x as f64).collect(),
+                );
+                let mut batch_loss = 0.0;
+                for (predicted_row, target_row) in outputs.rows_iter().zip(target_batch.rows_iter()) {
+                    batch_loss += predicted_row
+                        .iter()
+                        .zip(target_row.iter())
+                        .map(|(p, t)| (p - t).powi(2))
+                        .sum::<f64>() / outputs.cols as f64;
+                }
+                total_loss += batch_loss;
+
+                // Backward pass
+                let output_errors = &outputs - &target_batch;
+                let expanded_output_errors = output_errors.repeat_columns(self.embed_dim);
+                let predictions_clone = predictions.clone();
+                let attention_errors = self.backward_transformer(&predictions_clone, &expanded_output_errors);
+                self.update_weights(&attention_errors, self.learning_rate);
+
+                // Update progress bar
+                pb.inc(1);
+            }
+
+            println!(
+                "Epoch {}/{} - Loss: {:.4}",
+                epoch + 1,
+                self.epochs,
+                total_loss / self.training_data.rows as f64
+            );
+        }
+
+        let elapsed_time = start_time.elapsed();
+        println!(
+            "\nTraining completed in {:.2?} (hh:mm:ss.milliseconds)",
+            elapsed_time
         );
     }
 

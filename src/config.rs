@@ -15,13 +15,13 @@ pub struct Config {
     pub batch_size: usize,
     pub num_heads: usize,
     pub num_layers: usize,
+    pub classify: bool,
     pub model_dimensions: usize,
     pub hidden_dimensions: usize,
     pub columns: ColumnsConfig, // Add this field
     pub activation_fn_name: String,
     pub activation_alpha:f64,
     pub activation_lambda:f64,
-    pub show_progress: bool,
 }
 
 #[derive(Deserialize)]

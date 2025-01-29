@@ -1,0 +1,2 @@
+Row,Data,Error
+82950,StringRecord(["2017-07-26", "", "", "", "69.0842", "3", "BHF"]),Missing or invalid value in feature column 1; Missing or invalid value in feature column 2; Missing or invalid value in feature column 3

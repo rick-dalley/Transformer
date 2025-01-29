@@ -1,11 +1,11 @@
 {
   "data_file": "/Users/richarddalley/Code/Rust/Transformer/data/all_stocks_5yr.csv",
   "cap_data_rows": true,
-  "show_progress": true,
-  "max_data_rows": 40000,
+  "max_data_rows": 100000,
   "epochs": 1,
   "learning_rate": 0.3,
   "vocab_size": 10000,
+  "classify": false,
   "shuffle_data": true,
   "validation_split": 0.1,
   "sequence_length": 30,
