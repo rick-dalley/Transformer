@@ -12,6 +12,8 @@ use rand::seq::SliceRandom;
 use std::time::Instant;
 use crate::config;
 use indicatif::{ProgressBar, ProgressStyle};
+use redis::{Commands, RedisResult};
+use postgres::{Client, NoTls};
 
 // Model
 pub struct Model {
@@ -26,6 +28,7 @@ pub struct Model {
     split_index: usize,
     batch_size: usize,
     data_source: String, 
+    connection_string:String,
     data_location: String,
     num_layers: usize, 
     num_heads: usize, 
@@ -85,6 +88,7 @@ impl Model {
             batch_size: config.batch_size,
             embed_dim: config.model_dimensions,
             data_source: config.data_source.clone(),
+            connection_string:config.connection_string.clone(),
             data_location: config.location.clone(),
             split_index: 0, // To be calculated during data processing
             sequence_length: config.sequence_length,
@@ -123,6 +127,235 @@ impl Model {
     }
 
     pub fn load_data(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        match self.data_source.as_str() {
+            "file" => self.load_from_file(),
+            "redis" | "postgres" => self.load_from_db(),
+            _ => Err(format!("Unsupported data source: {}", self.data_source).into()),
+        }
+    }
+
+
+pub fn load_from_db(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    match self.data_source.as_str() {
+        "redis" => self.load_from_redis(),
+        "postgres" => self.load_from_postgres(),
+        _ => Err(format!("Unsupported database type: {}", self.data_source).into()),
+    }
+}
+
+// Load data from Redis
+fn load_from_redis(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    let client = redis::Client::open(self.connection_string.as_str())?;
+    let mut con = client.get_connection()?;
+
+    let keys: RedisResult<Vec<String>> = con.keys("*");
+    if keys.is_err() {
+        return Err("No keys found in Redis.".into());
+    }
+
+    let mut raw_data: Vec<Vec<f64>> = Vec::new();
+    let mut labels: Vec<f64> = Vec::new();
+    let mut categorical_values: Vec<String> = Vec::new();
+    
+    let mut row_count = 0;
+    let mut skipped_rows = 0;
+
+    for key in keys.unwrap() {
+        if self.cap_data_rows && row_count >= self.max_data_rows {
+            break;
+        }
+        let value: String = con.get(&key)?;
+        let record: Vec<String> = serde_json::from_str(&value)?;
+
+        let (valid, features, label, category) = self.process_record(&record);
+        
+        if valid {
+            raw_data.push(features);
+            labels.push(label);
+            categorical_values.push(category);
+            row_count += 1;
+        } else {
+            skipped_rows += 1;
+        }
+    }
+
+    println!(
+        "Loaded {} rows from Redis. Skipped {} invalid rows.",
+        row_count, skipped_rows
+    );
+
+    self.process_loaded_data(raw_data, labels, categorical_values)
+}
+
+// Load data from PostgreSQL
+fn load_from_postgres(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    let mut client = Client::connect(self.connection_string.as_str(), NoTls)?;
+
+    let feature_columns = self.columns.features.join(", ");
+    let target_column = &self.columns.target;
+    let categorical_column = &self.columns.categorical_column;
+
+    let query = format!(
+        "SELECT {}, {}, {} FROM my_table",
+        feature_columns, target_column, categorical_column
+    );
+
+    let rows = client.query(query.as_str(), &[])?;
+
+    let mut raw_data: Vec<Vec<f64>> = Vec::new();
+    let mut labels: Vec<f64> = Vec::new();
+    let mut categorical_values: Vec<String> = Vec::new();
+
+    let mut row_count = 0;
+    let mut skipped_rows = 0;
+
+    for row in rows {
+        if self.cap_data_rows && row_count >= self.max_data_rows {
+            break;
+        }
+
+        let record: Vec<String> = (0..self.columns.features.len() + 2)
+            .map(|i| row.get::<_, String>(i))
+            .collect();
+
+        let (valid, features, label, category) = self.process_record(&record);
+
+        if valid {
+            raw_data.push(features);
+            labels.push(label);
+            categorical_values.push(category);
+            row_count += 1;
+        } else {
+            skipped_rows += 1;
+        }
+    }
+
+    println!(
+        "Loaded {} rows from PostgreSQL. Skipped {} invalid rows.",
+        row_count, skipped_rows
+    );
+
+    self.process_loaded_data(raw_data, labels, categorical_values)
+}
+
+// Process a single record (for both Redis and PostgreSQL)
+fn process_record(
+    &self,
+    record: &[String]
+) -> (bool, Vec<f64>, f64, String) {
+    let mut valid = true;
+    let mut features = Vec::new();
+    let mut errors = Vec::new();
+
+    for (i, value) in record.iter().enumerate() {
+        if i < self.columns.features.len() {
+            match value.parse::<f64>() {
+                Ok(num) => features.push(num),
+                Err(_) => {
+                    valid = false;
+                    errors.push(format!("Invalid numeric value in column {}", i));
+                }
+            }
+        }
+    }
+
+    let target_value = record[self.columns.features.len()].parse::<f64>().unwrap_or_else(|_| {
+        valid = false;
+        errors.push("Invalid target value".to_string());
+        0.0
+    });
+
+    let category_value = record[self.columns.features.len() + 1].clone();
+
+    if category_value.is_empty() {
+        valid = false;
+        errors.push("Empty value in categorical column".to_string());
+    }
+
+    if !valid {
+        println!("Skipping row due to errors: {:?}", errors);
+    }
+
+    (valid, features, target_value, category_value)
+}
+
+// Final processing of loaded data (shared for file, Redis, and Postgres)
+fn process_loaded_data(
+    &mut self,
+    mut raw_data: Vec<Vec<f64>>,
+    labels: Vec<f64>,
+    categorical_values: Vec<String>
+) -> Result<(), Box<dyn std::error::Error>> {
+    if raw_data.is_empty() {
+        return Err("No valid data to process".into());
+    }
+
+    let num_features = raw_data[0].len();
+    let mut feature_means = vec![0.0; num_features];
+    let mut feature_stds = vec![0.0; num_features];
+
+    for row in &raw_data {
+        for (i, &value) in row.iter().enumerate() {
+            feature_means[i] += value;
+        }
+    }
+    feature_means.iter_mut().for_each(|mean| *mean /= raw_data.len() as f64);
+
+    for row in &raw_data {
+        for (i, &value) in row.iter().enumerate() {
+            feature_stds[i] += (value - feature_means[i]).powi(2);
+        }
+    }
+    feature_stds.iter_mut().for_each(|std| *std = (*std / raw_data.len() as f64).sqrt());
+
+    for row in &mut raw_data {
+        for (i, value) in row.iter_mut().enumerate() {
+            *value = (*value - feature_means[i]) / feature_stds[i];
+        }
+    }
+
+    let categorical_map: std::collections::HashMap<String, usize> = categorical_values
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(idx, value)| (value, idx))
+        .collect();
+    let categorical_indices: Vec<usize> = categorical_values
+        .iter()
+        .map(|value| *categorical_map.get(value).unwrap())
+        .collect();
+
+    let mut data: Vec<Vec<f64>> = Vec::new();
+    let mut sequence_labels: Vec<f64> = Vec::new();
+
+    for i in 0..(raw_data.len() - self.sequence_length) {
+        let mut sequence: Vec<f64> = Vec::new();
+
+        for j in 0..self.sequence_length {
+            sequence.extend(&raw_data[i + j]);
+            sequence.push(categorical_indices[i + j] as f64);
+        }
+
+        data.push(sequence);
+        sequence_labels.push(labels[i + self.sequence_length - 1]);
+    }
+
+    self.data = Matrix::new(data.len(), data[0].len(), data.into_iter().flatten().collect());
+    self.labels = sequence_labels.iter().map(|&x| x as usize).collect();
+
+    if self.validation_split > 0.0 {
+        self.split_data();
+    } else {
+        self.split_index = self.data.rows;
+        self.training_data = self.data.clone();
+        self.training_labels = self.labels.clone();
+    }
+
+    Ok(())
+}
+    pub fn load_from_file(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+
+        
         let mut reader = ReaderBuilder::new()
             .has_headers(true) // Assume headers are present for column names
             .from_path(&self.data_location)?;

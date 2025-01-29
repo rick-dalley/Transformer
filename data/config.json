@@ -1,6 +1,7 @@
 {
   "data_source": "file",
   "location": "/Users/richarddalley/Code/Rust/Transformer/data/all_stocks_5yr.csv",
+  "connection_string": "",
   "cap_data_rows": true,
   "max_data_rows": 1260,
   "epochs": 1,
