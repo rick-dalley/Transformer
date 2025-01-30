@@ -2,7 +2,6 @@ use crate::config;
 use redis::{Commands, RedisResult};
 use postgres::{Client, NoTls};
 use csv::ReaderBuilder;
-use std::io::Write;
 use rand::prelude::SliceRandom;
 use crate::matrix::Matrix;
 
@@ -12,7 +11,6 @@ pub struct DataLoader {
     pub connection_string: Option<String>,
     pub cap_data_rows: bool,
     pub max_data_rows: usize,
-    pub columns: config::ColumnsConfig,
     pub sequence_length: usize,
     pub training_data:Matrix,
     pub training_labels: Vec<usize>,
@@ -20,6 +18,7 @@ pub struct DataLoader {
     pub validation_labels: Vec<usize>,
     pub validation_split: f64,
     pub split_index:usize,
+    pub columns: Option<config::ColumnsConfig>,
 }
 
 impl DataLoader {
@@ -32,7 +31,7 @@ impl DataLoader {
         let cap_data_rows=config.cap_data_rows;
         let max_data_rows=config.max_data_rows;
         let sequence_length=config.sequence_length;
-        let columns=config.columns.clone();
+        let columns=config.columns.clone(); //allow 'None' if missing
         let training_data= Matrix::zeros(0, config.sequence_length);
         let training_labels= vec![];
         let validation_data= Matrix::zeros(0, config.sequence_length);
@@ -129,7 +128,14 @@ impl DataLoader {
     // Load data from PostgreSQL
     fn load_from_postgres(&mut self, error_log_location: &str) -> Result<(), Box<dyn std::error::Error>> {
 
+
         println!("{}", error_log_location);
+
+        // ✅ Early return with an error if `columns` is missing
+        let columns = match self.columns.as_ref() {
+            Some(columns) => columns,
+            None => return Err("Error: Columns are required for structured datasets in PostgreSQL.".into()),
+        };
 
         let connection_str = self.connection_string
             .as_deref() // Converts `Option<String>` into `Option<&str>`
@@ -137,9 +143,9 @@ impl DataLoader {
 
         let mut client = Client::connect(connection_str, NoTls)?;
 
-        let feature_columns = self.columns.features.join(", ");
-        let target_column = &self.columns.target;
-        let categorical_column = &self.columns.categorical_column;
+        let feature_columns = columns.features.join(", ");
+        let target_column = &columns.target;
+        let categorical_column = &columns.categorical_column;
 
         let query = format!(
             "SELECT {}, {}, {} FROM my_table",
@@ -160,7 +166,7 @@ impl DataLoader {
                 break;
             }
 
-            let record: Vec<String> = (0..self.columns.features.len() + 2)
+            let record: Vec<String> = (0..columns.features.len() + 2)
                 .map(|i| row.get::<_, String>(i))
                 .collect();
 
@@ -193,8 +199,14 @@ impl DataLoader {
         let mut features = Vec::new();
         let mut errors = Vec::new();
 
+        // ✅ Check if columns exist before using them
+        let feature_len = match &self.columns {
+            Some(columns) => columns.features.len(),
+            None => record.len().saturating_sub(2), // Assume all except last 2 columns are features
+        };
+
         for (i, value) in record.iter().enumerate() {
-            if i < self.columns.features.len() {
+            if i < feature_len {
                 match value.parse::<f64>() {
                     Ok(num) => features.push(num),
                     Err(_) => {
@@ -205,13 +217,26 @@ impl DataLoader {
             }
         }
 
-        let target_value = record[self.columns.features.len()].parse::<f64>().unwrap_or_else(|_| {
-            valid = false;
-            errors.push("Invalid target value".to_string());
-            0.0
-        });
+        // ✅ Extract target value safely
+        let target_value = match record.get(feature_len) {
+            Some(value) => value.parse::<f64>().unwrap_or_else(|_| {
+                valid = false;
+                errors.push("Invalid target value".to_string());
+                0.0
+            }),
+            None => {
+                valid = false;
+                errors.push("Missing target value".to_string());
+                0.0
+            }
+        };
 
-        let category_value = record[self.columns.features.len() + 1].clone();
+        // ✅ Extract categorical value safely
+        let category_value = record.get(feature_len + 1).cloned().unwrap_or_else(|| {
+            valid = false;
+            errors.push("Missing categorical column value".to_string());
+            String::new()
+        });
 
         if category_value.is_empty() {
             valid = false;
@@ -300,197 +325,161 @@ impl DataLoader {
         Ok(())
     }
 
-    // load from file
+
     pub fn load_from_file(&mut self, error_log_location: &str) -> Result<(), Box<dyn std::error::Error>> {
+        println!("{}", error_log_location);
 
-        
-        let mut reader = ReaderBuilder::new()
-            .has_headers(true) // Assume headers are present for column names
-            .from_path(&self.data_location)?;
+        // ✅ Extract columns before calling `self.load_for_columns`
+        let columns = self.columns.clone();
 
-        // Extract the feature and target columns
-        let feature_indices: Vec<usize> = reader
-            .headers()?
-            .iter()
-            .enumerate()
-            .filter(|(_, name)| self.columns.features.contains(&name.to_string()))
-            .map(|(idx, _)| idx)
-            .collect();
-
-        let target_index = reader
-            .headers()?
-            .iter()
-            .position(|name| name == &self.columns.target)
-            .ok_or("Target column not found in the data file")?;
-
-        let categorical_index = reader
-            .headers()?
-            .iter()
-            .position(|name| name == &self.columns.categorical_column)
-            .ok_or("Categorical column not found in the data file")?;
-
-        // Initialize data storage
-        let mut raw_data: Vec<Vec<f64>> = Vec::new();
-        let mut labels: Vec<f64> = Vec::new();
-        let mut categorical_values: Vec<String> = Vec::new();
-
-        let mut row_count = 0; // Track the number of rows processed
-        let mut skipped_rows = 0; // Track skipped rows
-
-        // Open a log file for errors
-        let mut error_log = std::fs::File::create(error_log_location)?;
-        writeln!(error_log, "Row,Data,Error")?;
-
-        // Read and process the data
-        for record in reader.records() {
-            if self.cap_data_rows && row_count >= self.max_data_rows {
-                break; // Stop processing if cap_data_rows is enabled and max_data_rows is reached
-            }
-
-            let record = record?;
-            row_count += 1;
-
-            // Check for missing or invalid values
-            let mut valid = true;
-            let mut errors = Vec::new();
-
-            // Validate feature columns
-            let features: Vec<f64> = feature_indices
-                .iter()
-                .map(|&idx| {
-                    record[idx]
-                        .parse::<f64>()
-                        .map_err(|_| format!("Missing or invalid value in feature column {}", idx))
-                })
-                .filter_map(|res| match res {
-                    Ok(val) => Some(val),
-                    Err(e) => {
-                        valid = false;
-                        errors.push(e);
-                        None
-                    }
-                })
-                .collect();
-
-            // Validate target column
-            let target = record[target_index].parse::<f64>().map_err(|_| {
-                valid = false;
-                format!("Missing or invalid value in target column {}", target_index)
-            });
-
-            if target.is_err() {
-                errors.push(target.unwrap_err());
-            } else {
-                labels.push(target.unwrap());
-            }
-
-            // Validate categorical column
-            if record[categorical_index].is_empty() {
-                valid = false;
-                errors.push(format!(
-                    "Missing or invalid value in categorical column {}",
-                    categorical_index
-                ));
-            } else {
-                categorical_values.push(record[categorical_index].to_string());
-            }
-
-            // Log and skip invalid rows
-            if !valid {
-                skipped_rows += 1;
-                writeln!(
-                    error_log,
-                    "{},{:?},{}",
-                    row_count,
-                    record,
-                    errors.join("; ")
-                )?;
-                continue;
-            }
-
-            // Add valid features to raw data
-            raw_data.push(features);
-        }
-
-        println!(
-            "Processed {} rows. Skipped {} invalid rows.",
-            row_count, skipped_rows
-        );
-
-        if raw_data.is_empty() {
-            return Err("No valid data to process".into());
-        }
-
-        // Normalize features dynamically (z-score normalization)
-        let num_features = raw_data[0].len();
-        let mut feature_means = vec![0.0; num_features];
-        let mut feature_stds = vec![0.0; num_features];
-
-        // Calculate mean and standard deviation for each feature
-        for row in &raw_data {
-            for (i, &value) in row.iter().enumerate() {
-                feature_means[i] += value;
-            }
-        }
-        feature_means.iter_mut().for_each(|mean| *mean /= raw_data.len() as f64);
-
-        for row in &raw_data {
-            for (i, &value) in row.iter().enumerate() {
-                feature_stds[i] += (value - feature_means[i]).powi(2);
-            }
-        }
-        feature_stds.iter_mut().for_each(|std| *std = (*std / raw_data.len() as f64).sqrt());
-
-        // Apply z-score normalization
-        for row in &mut raw_data {
-            for (i, value) in row.iter_mut().enumerate() {
-                *value = (*value - feature_means[i]) / feature_stds[i];
-            }
-        }
-
-        // Handle categorical column (e.g., embedding or one-hot encoding)
-        let categorical_map: std::collections::HashMap<String, usize> = categorical_values
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(idx, value)| (value, idx))
-            .collect();
-        let categorical_indices: Vec<usize> = categorical_values
-            .iter()
-            .map(|value| *categorical_map.get(value).unwrap())
-            .collect();
-
-        // Create sequences
-        let mut data: Vec<Vec<f64>> = Vec::new();
-        let mut sequence_labels: Vec<f64> = Vec::new();
-
-        for i in 0..(raw_data.len() - self.sequence_length) {
-            let mut sequence: Vec<f64> = Vec::new();
-
-            for j in 0..self.sequence_length {
-                sequence.extend(&raw_data[i + j]); // Add features
-                sequence.push(categorical_indices[i + j] as f64); // Add categorical index
-            }
-
-            data.push(sequence);
-            sequence_labels.push(labels[i + self.sequence_length - 1]); // Use last value in sequence
-        }
-
-        // Convert data to Matrix format
-        let raw_data = Matrix::new(data.len(), data[0].len(), data.into_iter().flatten().collect());
-        let raw_labels:Vec<usize> = sequence_labels.iter().map(|&x| x as usize).collect();
-
-        if self.validation_split > 0.0 {
-            self.split_data(&raw_data, &raw_labels);
+        if let Some(columns) = columns {
+            // ✅ Pass `columns`, avoiding borrowing `self` mutably while it's already borrowed immutably
+            self.load_for_columns(&columns)
         } else {
-            // No split, assign all data to training
-            self.split_index = raw_data.rows;
-            self.training_data = raw_data.clone();
-            self.training_labels = raw_labels.clone();
+            // ✅ Call `load_for_fixed()` safely
+            self.load_for_fixed()
+        }
+    }
+
+// ✅ Function to load structured datasets (CSV with defined columns)
+fn load_for_columns(&mut self, columns: &config::ColumnsConfig) -> Result<(), Box<dyn std::error::Error>> {
+    let mut reader = ReaderBuilder::new()
+        .has_headers(true) // Assume headers are present
+        .from_path(&self.data_location)?;
+
+    let headers = reader.headers()?.clone();
+
+    let feature_indices: Vec<usize> = headers
+        .iter()
+        .enumerate()
+        .filter(|(_, name)| columns.features.contains(&name.to_string()))
+        .map(|(idx, _)| idx)
+        .collect();
+
+    let target_index = headers.iter()
+        .position(|name| name == &columns.target)
+        .ok_or("Target column not found in the data file")?;
+
+    let categorical_index = headers.iter()
+        .position(|name| name == &columns.categorical_column)
+        .ok_or("Categorical column not found in the data file")?;
+
+    let mut raw_data: Vec<Vec<f64>> = Vec::new();
+    let mut labels: Vec<f64> = Vec::new();
+    let mut categorical_values: Vec<String> = Vec::new();
+
+    let mut row_count = 0;
+    let mut skipped_rows = 0;
+
+    for record in reader.records() {
+        let record = record?;
+        row_count += 1;
+
+        if self.cap_data_rows && row_count > self.max_data_rows {
+            break;
         }
 
-        Ok(())
+        let mut valid = true;
+        let mut errors = Vec::new();
+
+        let features: Vec<f64> = feature_indices.iter()
+            .map(|&idx| record[idx].parse::<f64>().map_err(|_| format!("Invalid feature value in column {}", idx)))
+            .filter_map(|res| match res {
+                Ok(val) => Some(val),
+                Err(e) => {
+                    valid = false;
+                    errors.push(e);
+                    None
+                }
+            })
+            .collect();
+
+        let label = record[target_index].parse::<f64>().unwrap_or_else(|_| {
+            valid = false;
+            errors.push(format!("Invalid target value in column {}", target_index));
+            0.0
+        });
+
+        categorical_values.push(record[categorical_index].to_string());
+
+        if !valid {
+            skipped_rows += 1;
+            println!("Skipping row {} due to errors: {:?}", row_count, errors);
+            continue;
+        }
+
+        raw_data.push(features);
+        labels.push(label);
     }
+
+    println!(
+        "Processed {} rows. Skipped {} invalid rows.",
+        row_count, skipped_rows
+    );
+
+    self.process_loaded_data(raw_data, labels, categorical_values)
+}
+
+// ✅ Function to load fixed-format datasets (like MNIST)
+fn load_for_fixed(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Warning: No column names defined. Assuming first column is the label.");
+
+    let mut reader = ReaderBuilder::new()
+        .has_headers(false) // Assume no headers in fixed datasets
+        .from_path(&self.data_location)?;
+
+    let mut raw_data: Vec<Vec<f64>> = Vec::new();
+    let mut labels: Vec<f64> = Vec::new();
+
+    let mut row_count = 0;
+    let mut skipped_rows = 0;
+
+    for record in reader.records() {
+        let record = record?;
+        row_count += 1;
+
+        if self.cap_data_rows && row_count > self.max_data_rows {
+            break;
+        }
+
+        let mut valid = true;
+        let mut errors = Vec::new();
+
+        // ✅ First column is the label
+        let label = record[0].parse::<f64>().unwrap_or_else(|_| {
+            valid = false;
+            errors.push("Invalid label value".to_string());
+            0.0
+        });
+
+        // ✅ Remaining columns are features
+        let features: Vec<f64> = record.iter()
+            .skip(1) // Skip the first column (label)
+            .map(|pixel| pixel.parse::<f64>().unwrap_or_else(|_| {
+                valid = false;
+                errors.push("Invalid pixel value".to_string());
+                0.0
+            }) / 255.0) // Normalize grayscale
+            .collect();
+
+        if !valid {
+            skipped_rows += 1;
+            println!("Skipping row {} due to errors: {:?}", row_count, errors);
+            continue;
+        }
+
+        raw_data.push(features);
+        labels.push(label);
+    }
+
+    println!(
+        "Processed {} rows. Skipped {} invalid rows.",
+        row_count, skipped_rows
+    );
+
+    self.process_loaded_data(raw_data, labels, vec![])
+}
+
 
     pub fn split_data(&mut self, data:&Matrix, labels:&Vec<usize>) {
 

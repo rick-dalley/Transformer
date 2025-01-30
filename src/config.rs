@@ -23,13 +23,15 @@ pub struct Config {
     pub classify: bool,
     pub model_dimensions: usize,
     pub hidden_dimensions: usize,
-    pub columns: ColumnsConfig, // Add this field
     pub activation_fn_name: String,
     pub activation_alpha:f64,
     pub activation_lambda:f64,
 
     #[serde(default = "default_checkpoint_interval")]
     pub checkpoint_interval: usize, // Set dynamically
+
+    //optional if there is no column header then this is not needed
+    pub columns: Option<ColumnsConfig>, 
 }
 
 #[derive(Deserialize,Debug, Clone)] 
@@ -51,6 +53,10 @@ impl Config {
         let reader = BufReader::new(file);
         let mut config: Config = from_reader(reader)?;
         config.checkpoint_interval = Config::checkpoint_interval(config.epochs, config.check_points);
+
+        if config.columns.is_none() {
+            println!("Warning, no columns were defined.  Assuming fixed feature set.")
+        }
         Ok(config)
     }
     //checkpoint calculation
