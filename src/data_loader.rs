@@ -57,24 +57,28 @@ impl DataLoader {
     }
 
 
-    pub fn load_data(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn load_data(&mut self, project_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let error_log_location = format!("./data/{}/error_log.csv", project_name);
         match self.data_source.as_str() {
-            "file" => self.load_from_file(),
-            "redis" | "postgres" => self.load_from_db(),
+            "file" => self.load_from_file(&error_log_location),
+            "redis" | "postgres" => self.load_from_db(&error_log_location),
             _ => Err(format!("Unsupported data source: {}", self.data_source).into()),
         }
     }
 
-    pub fn load_from_db(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn load_from_db(&mut self, error_log_location: &str) -> Result<(), Box<dyn std::error::Error>> {
         match self.data_source.as_str() {
-            "redis" => self.load_from_redis(),
-            "postgres" => self.load_from_postgres(),
+            "redis" => self.load_from_redis(error_log_location),
+            "postgres" => self.load_from_postgres(error_log_location),
             _ => Err(format!("Unsupported database type: {}", self.data_source).into()),
         }
     }
 
     // Load data from Redis
-    fn load_from_redis(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    fn load_from_redis(&mut self, error_log_location: &str) -> Result<(), Box<dyn std::error::Error>> {
+
+        println!("{}", error_log_location);
+
         let connection_str = self.connection_string
             .as_deref() // Converts `Option<String>` into `Option<&str>`
             .ok_or("Missing connection string for Redis")?;
@@ -123,7 +127,10 @@ impl DataLoader {
     }
 
     // Load data from PostgreSQL
-    fn load_from_postgres(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    fn load_from_postgres(&mut self, error_log_location: &str) -> Result<(), Box<dyn std::error::Error>> {
+
+        println!("{}", error_log_location);
+
         let connection_str = self.connection_string
             .as_deref() // Converts `Option<String>` into `Option<&str>`
             .ok_or("Missing connection string for Redis")?;
@@ -294,7 +301,7 @@ impl DataLoader {
     }
 
     // load from file
-    pub fn load_from_file(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn load_from_file(&mut self, error_log_location: &str) -> Result<(), Box<dyn std::error::Error>> {
 
         
         let mut reader = ReaderBuilder::new()
@@ -331,7 +338,7 @@ impl DataLoader {
         let mut skipped_rows = 0; // Track skipped rows
 
         // Open a log file for errors
-        let mut error_log = std::fs::File::create("./data/error_log.csv")?;
+        let mut error_log = std::fs::File::create(error_log_location)?;
         writeln!(error_log, "Row,Data,Error")?;
 
         // Read and process the data

@@ -14,7 +14,7 @@ use std::fs::File;
 use std::io::{Write, BufWriter};
 use std::fs::OpenOptions;
 use plotters::prelude::*;
-
+const DATA_PATH: &str = "./data/{1}/{2}";
 // Model
 pub struct Model<'a> {
     pub data_loader: &'a mut DataLoader,
@@ -33,6 +33,7 @@ pub struct Model<'a> {
     embedding_matrix: Matrix,
     activation_fn: Box<dyn activation_functions::ActivationTrait>,
     derivative_fn: Box<dyn activation_functions::ActivationTrait>,
+    project: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -47,10 +48,12 @@ impl<'a> Model<'a> {
     // from_json - build a model from json
     pub fn from_json(
         config: &config::Config, 
-        data_loader:&'a mut DataLoader
+        data_loader:&'a mut DataLoader,
+        project_name: &str,
     ) -> Result<Self, Box<dyn std::error::Error>> {
 
         // Open the JSON file
+        let project = DATA_PATH.replace("{1}", project_name);
         let config_clone = config.clone();
         let num_classes = 6;
         let epochs= config.epochs;
@@ -95,7 +98,8 @@ impl<'a> Model<'a> {
             final_output_weights,            // Initialize data-related fields
             embedding_matrix,
             activation_fn : activation_fn,
-            derivative_fn : derivative_fn
+            derivative_fn : derivative_fn,
+            project,
         };
 
 
@@ -476,7 +480,8 @@ impl<'a> Model<'a> {
         let start_time = Instant::now();
         let mut loss_history: Vec<f64> = Vec::new();
         let mut accuracy_history: Vec<f64> = Vec::new();
-
+        let checkpoint_location = self.project.replace("{2}", "model_checkpoint.json");
+        let lossplot_location = self.project.replace("{2}", "loss_plot.png");
         // Progress bar setup
         let iterations: u64 = (self.epochs * (self.data_loader.training_data.rows / self.batch_size)) as u64;
         let pb = ProgressBar::new(iterations);
@@ -541,7 +546,7 @@ impl<'a> Model<'a> {
             // check if it's time to do a check point
             if epoch % self.checkpoint == 0 {
                 println!("Saving...");
-                self.save_checkpoint("./data/model_checkpoint.json").expect("Failed to save model.");
+                self.save_checkpoint(checkpoint_location.as_str()).expect("Failed to save model.");
             }
 
             let avg_loss = total_loss / self.data_loader.training_data.rows as f64;
@@ -552,13 +557,13 @@ impl<'a> Model<'a> {
             accuracy_history.push(accuracy);
 
             // Log the loss for this epoch
-            Model::log_training_metrics(epoch, avg_loss, accuracy);
+            Model::log_training_metrics(epoch, avg_loss, accuracy, &self.project);
 
             println!("Epoch {}/{} - Loss: {:.4}", epoch + 1, self.epochs, avg_loss);
 
         }
 
-        Model::plot_loss_curve(loss_history, "./data/loss_plot.png").expect("Failed to generate loss plot");
+        Model::plot_loss_curve(loss_history, lossplot_location.as_str()).expect("Failed to generate loss plot");
                
         let elapsed_time = start_time.elapsed();
         
@@ -569,11 +574,13 @@ impl<'a> Model<'a> {
     }
 
     // log training metrics
-    fn log_training_metrics(epoch: usize, loss: f64, accuracy: f64) {
+    fn log_training_metrics(epoch: usize, loss: f64, accuracy: f64, project: &str) {
+ 
+        let training_log_location = project.replace("{2}", "training_log.csv");
         let mut file = OpenOptions::new()
             .append(true)
             .create(true)
-            .open("./data/training_log.csv")
+            .open(training_log_location)
             .expect("Failed to open log file");
 
         writeln!(file, "{},{},{}", epoch, loss, accuracy).expect("Failed to write log.");
