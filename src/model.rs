@@ -11,7 +11,7 @@ use crate::matrix::{Matrix, Dot};
 use crate::data_loader::DataLoader;
 use serde::{Serialize, Deserialize};
 use std::fs::File;
-use std::io::Write;
+use std::io::{Write, BufWriter};
 use std::fs::OpenOptions;
 use plotters::prelude::*;
 
@@ -561,7 +561,9 @@ impl<'a> Model<'a> {
         }
 
         Model::plot_loss_curve(loss_history, "./data/loss_plot.png").expect("Failed to generate loss plot");
+               
         let elapsed_time = start_time.elapsed();
+        
         println!(
             "\nTraining completed in {:.2?} (hh:mm:ss.milliseconds)",
             elapsed_time
@@ -603,5 +605,23 @@ impl<'a> Model<'a> {
         self.output_layer(&transformed)
     }
 
+    pub fn evaluate(&self, filename: Option<&str>) {
+        let predictions = self.predict(&self.data_loader.validation_data);
 
+        if let Some(file) = filename {
+            let file = File::create(file).expect("Failed to create prediction file");
+            let mut writer = BufWriter::new(file);
+
+            for (i, pred) in predictions.data.iter().enumerate() {
+                writeln!(writer, "Sample {}: {:?}", i + 1, pred).expect("Failed to write to file");
+            }
+
+            println!("Predictions saved to {:?}", filename);
+        } else {
+            println!("Predictions:");
+            for (i, pred) in predictions.data.iter().enumerate() {
+                println!("Sample {}: {:?}", i + 1, pred);
+            }
+        }
+    }
 }

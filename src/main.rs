@@ -32,4 +32,5 @@ fn main() {
     };
     model.print_config();
     model.train();
+    model.evaluate(Some("./data/evaluation.json"));
 }
