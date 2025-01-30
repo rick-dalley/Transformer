@@ -44,9 +44,11 @@ struct ModelCheckpoint {
 
 impl<'a> Model<'a> {
     
-
     // from_json - build a model from json
-    pub fn from_json(config: &config::Config, data_loader:&'a mut DataLoader) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn from_json(
+        config: &config::Config, 
+        data_loader:&'a mut DataLoader
+    ) -> Result<Self, Box<dyn std::error::Error>> {
 
         // Open the JSON file
         let config_clone = config.clone();
@@ -109,7 +111,7 @@ impl<'a> Model<'a> {
         self.derivative_fn.apply(x)
     }
 
-    //  computes query (Q), key (K), and value (V) matrices, and applies the attention formula:
+    // Computes query (Q), key (K), and value (V) matrices, and applies the attention formula:
     // Attention}(Q, K, V) = softmax(QK^T / √d_k) * V
     fn scaled_dot_product_attention(
         &self,
@@ -193,7 +195,6 @@ impl<'a> Model<'a> {
         // Concatenate heads and return the combined result
         Matrix::concat_heads(&attention_heads)
     }
-
 
     pub fn feedforward_network(&self, input: &Matrix) -> Matrix {
         // Use the activation function stored in self.activation_fn
@@ -324,7 +325,6 @@ impl<'a> Model<'a> {
         attention_gradients
     }
 
-
     pub fn train(&mut self) {
 
         if self.classify {
@@ -333,8 +333,6 @@ impl<'a> Model<'a> {
             self.train_regression();
         }
     }
-
-
 
     pub fn save_checkpoint(&self, path: &str) -> std::io::Result<()> {
         let checkpoint = ModelCheckpoint {
@@ -570,7 +568,6 @@ impl<'a> Model<'a> {
         );
     }
 
-
     // log training metrics
     fn log_training_metrics(epoch: usize, loss: f64, accuracy: f64) {
         let mut file = OpenOptions::new()
@@ -624,4 +621,5 @@ impl<'a> Model<'a> {
             }
         }
     }
+
 }

@@ -1,0 +1,28 @@
+{
+  "data_source": "file",
+  "location": "/Users/richarddalley/Code/Rust/Transformer/data/mnist/mnist_train.csv",
+  "connection_string": "",
+  "cap_data_rows": true,
+  "max_data_rows": 12600,
+  "epochs": 4,
+  "check_points": 0,
+  "learning_rate": 0.3,
+  "vocab_size": 10000,
+  "classify": false,
+  "shuffle_data": true,
+  "validation_split": 0.1,
+  "sequence_length": 30,
+  "batch_size": 32,
+  "num_heads": 8,
+  "num_layers": 6,
+  "activation_fn_name": "leaky_relu",
+  "activation_alpha": 0.01,
+  "activation_lambda": 1.0507009873554802,
+  "model_dimensions": 512,
+  "hidden_dimensions": 2048,
+  "columns": {
+    "features": ["open", "high", "low", "close", "volume"],
+    "target": "close",
+    "categorical_column": "Name"
+  }
+}

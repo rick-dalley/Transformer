@@ -8,7 +8,7 @@ use data_loader::DataLoader;
 use model::Model;
 
 fn main() {
-    let config_location = "/Users/richarddalley/Code/Rust/Transformer/data/config.json";
+    let config_location = "/Users/richarddalley/Code/Rust/Transformer/data/stocks/config.json";
     let config = match Config::from_json(config_location) {
         Ok(config) => config,
         Err(e) => {
