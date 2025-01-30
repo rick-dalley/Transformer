@@ -7,3 +7,4 @@ data/model_checkpoint.json
 data/training_log.csv
 data/loss_plot.png
 data/evaluation.json
+launch.json
