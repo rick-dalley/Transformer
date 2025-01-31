@@ -1,3 +1,4 @@
+
 mod data_loader;
 mod model;
 pub mod config;
@@ -6,6 +7,10 @@ pub mod activation_functions;
 use config::Config;
 use data_loader::DataLoader;
 use model::Model;
+// use model::{ClassificationTaskImpl, RegressionTaskImpl}; // Import task implementations
+use crate::model::{TaskEnum, ClassificationTaskImpl, RegressionTaskImpl}; 
+use config::LearningTask; 
+
 static DATA_PATH: &str = "./data/{1}/{2}";
 
 fn main() {
@@ -26,13 +31,24 @@ fn main() {
         return;
     }
 
-    let mut model = match Model::from_json(&config, &mut data_loader, &project) {
+    let task = match config.learning_task {
+        LearningTask::Classification => TaskEnum::Classification(ClassificationTaskImpl),
+        LearningTask::Regression => TaskEnum::Regression(RegressionTaskImpl),
+        LearningTask::Unsupervised => {
+            eprintln!("Unsupervised learning is not implemented");
+            return;
+        }
+    };
+
+    // Create the model
+    let mut model = match Model::from_json(&config, &mut data_loader, &project, task) {
         Ok(model) => model,
         Err(e) => {
             eprintln!("Error creating model: {}", e);
             return;
         }
     };
+
     model.print_config();
     model.train();
     model.evaluate(Some(&evaluation_location));
