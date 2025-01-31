@@ -1,10 +1,9 @@
 // module Model
 // Richard Dalley
 
+// uses
 use std::time::Instant;
-
 use indicatif::{ProgressBar, ProgressStyle};
-
 use crate::activation_functions::{self};
 use crate::config;
 use crate::matrix::{Matrix, Dot};
@@ -15,6 +14,19 @@ use std::io::{self, BufWriter, Write};
 use std::fs::OpenOptions;
 use plotters::prelude::*;
 const DATA_PATH: &str = "./data/{1}/{2}";
+
+// Traits
+
+// TransformerForward
+trait TransformerForward  {
+    fn forward_transformer(&self, input: &Matrix) -> Matrix;
+}
+
+// TransformerLayer
+trait TransformerLayer {
+    fn transformer_layer(&self, input: &Matrix) -> Matrix;
+}
+
 // Model
 pub struct Model<'a> {
     pub data_loader: &'a mut DataLoader,
@@ -45,7 +57,6 @@ struct ModelCheckpoint {
 
 impl<'a> Model<'a> {
     
-    // from_json - build a model from json
     pub fn from_json(
         config: &config::Config, 
         data_loader:&'a mut DataLoader,
@@ -221,47 +232,6 @@ impl<'a> Model<'a> {
         let variance = input.variance();
         input.apply(|x| (x - mean) / (variance + epsilon).sqrt())
     }
-        
-    pub fn transformer_layer(&self, input: &Matrix) -> Matrix {
-        // Multi-head attention with residual connection
-        let attention_output = self.multi_head_attention(input, input, input, self.num_heads, self.embed_dim);
-
-        // Create a temporary variable for the sum
-        let residual_sum = input + &attention_output; // Add &attention_output to avoid moving it
-        let attention_residual = self.layer_norm(&residual_sum);
-
-        // Feedforward network with residual connection
-        let ff_output = self.feedforward_network(&attention_residual);
-
-        if self.learning_task == config::LearningTask::Regression {
-            // ff_output // Directly return the feedforward output for regression
-            ff_output.repeat_columns(self.embed_dim)
-        } else {
-            self.layer_norm(&(attention_residual + ff_output)) // Normal residual addition for classification
-        }
-
-    }
-
-    pub fn forward_transformer(&self, input: &Matrix) -> Matrix {
-        // Extract the column with token indices (assume it's the first column for this example)
-        let token_indices = input.column_to_indices(0); // Adjust the column index if needed
-
-        // Apply embedding and positional encoding
-        let mut x = self.embedding(&token_indices);
-        let positional_enc = self.positional_encoding( self.embed_dim);
-        x = x.add_broadcast(&positional_enc);
-
-        // Pass through transformer layers
-        for _ in 0..self.num_layers {
-            x = self.transformer_layer(&x);
-        }
-
-        if self.learning_task == config::LearningTask::Classification {
-            x.dot(&self.final_output_weights) // Outputs logits (batch_size × num_classes)
-        } else {
-            x // No transformation, direct regression output
-        }
-    }
 
     pub fn output_layer(&self, input: &Matrix) -> Matrix {
     let result = input.dot(&self.final_output_weights);  // Perform the dot product
@@ -348,14 +318,22 @@ impl<'a> Model<'a> {
     }
 
     pub fn train(&mut self) {
-        print!("Training ");
+         print!("Training ");
         let start_time = Instant::now();
-        if self.learning_task == config::LearningTask::Classification{
-            self.train_classification();
-        } else {
-            self.train_regression();
+        match self.learning_task {
+            config::LearningTask::Classification => {
+                println!("(Classification)");
+                self.train_classification();
+            }
+            config::LearningTask::Regression => {
+                println!("(Regression)");
+                self.train_regression();
+            }
+            config::LearningTask::Unsupervised => {
+                panic!("Unsupervised learning is not implemented");
+            }
         }
-        println!(", completed in {:.2?} (hh:mm:ss.milliseconds)", start_time.elapsed() );
+         println!(", completed in {:.2?} (hh:mm:ss.milliseconds)", start_time.elapsed());
     }
 
     pub fn save_checkpoint(&self, path: &str) -> std::io::Result<()> {
@@ -642,4 +620,47 @@ impl<'a> Model<'a> {
         }
     }
 
+}
+
+
+
+// Trait implementations
+
+// TransformerLayer
+impl TransformerLayer for Model<'_> {
+    fn transformer_layer(&self, input: &Matrix) -> Matrix {
+        let attention_output = self.multi_head_attention(input, input, input, self.num_heads, self.embed_dim);
+        let residual_sum = input + &attention_output;
+        let attention_residual = self.layer_norm(&residual_sum);
+        let ff_output = self.feedforward_network(&attention_residual);
+        
+        match self.learning_task {
+            config::LearningTask::Regression => ff_output.repeat_columns(self.embed_dim),
+            _ => self.layer_norm(&(attention_residual + ff_output)),
+        }
+    }
+}
+
+// TransformerForward
+impl TransformerForward for Model<'_> {
+    fn forward_transformer(&self, input: &Matrix) -> Matrix {
+        // Extract the column with token indices (assume it's the first column for this example)
+        let token_indices = input.column_to_indices(0); // Adjust the column index if needed
+
+        // Apply embedding and positional encoding
+        let mut x = self.embedding(&token_indices);
+        let positional_enc = self.positional_encoding(self.embed_dim);
+        x = x.add_broadcast(&positional_enc);
+
+        // Pass through transformer layers
+        for _ in 0..self.num_layers {
+            x = self.transformer_layer(&x);
+        }
+
+        // Adjust output depending on classification or regression
+        match self.learning_task {
+            config::LearningTask::Classification => x.dot(&self.final_output_weights),
+            _ => x,
+        }
+    }
 }
