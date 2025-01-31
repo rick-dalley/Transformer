@@ -11,7 +11,7 @@ use crate::matrix::{Matrix, Dot};
 use crate::data_loader::DataLoader;
 use serde::{Serialize, Deserialize};
 use std::fs::File;
-use std::io::{Write, BufWriter};
+use std::io::{self, BufWriter, Write};
 use std::fs::OpenOptions;
 use plotters::prelude::*;
 const DATA_PATH: &str = "./data/{1}/{2}";
@@ -21,7 +21,7 @@ pub struct Model<'a> {
     epochs: usize,
     checkpoint: usize,
     learning_rate: f64,
-    classify: bool,
+    learning_task: config::LearningTask,
     batch_size: usize,
     num_layers: usize, 
     num_heads: usize, 
@@ -55,11 +55,11 @@ impl<'a> Model<'a> {
         // Open the JSON file
         let project = DATA_PATH.replace("{1}", project_name);
         let config_clone = config.clone();
-        let num_classes = 6;
+        let num_classes = config.num_classes;
         let epochs= config.epochs;
         let checkpoint = config.checkpoint_interval;
         let learning_rate =  config.learning_rate;
-        let classify =  config.classify;
+        let classify =  config.learning_task;
         let num_heads =  config.num_heads;
         let num_layers =  config.num_layers;
         let batch_size = config.batch_size;
@@ -67,13 +67,20 @@ impl<'a> Model<'a> {
         let output_attention_weights =  (0..config.num_heads)
             .map(|_| Matrix::random(config.model_dimensions / config.num_heads, config.model_dimensions / config.num_heads))
             .collect();            
-        let ff_hidden_weights =  Matrix::random(config.model_dimensions, config.hidden_dimensions);
-        let ff_output_weights =  Matrix::random(config.hidden_dimensions, config.model_dimensions);
+        
         let embedding_matrix =  Matrix::random(config.vocab_size, config.model_dimensions);
 
         let (activation_fn, derivative_fn) = activation_functions::get_activation_and_derivative(&config_clone);
 
-        let final_output_weights = if config.classify {
+        let ff_hidden_weights =  Matrix::random(config.model_dimensions, config.hidden_dimensions) ;
+        let learning_task = config.learning_task;
+        let ff_output_weights = if  learning_task == config::LearningTask::Classification {
+            Matrix::random(config.hidden_dimensions, num_classes) // Fix for classification
+        } else {
+            Matrix::random(config.hidden_dimensions, 1) // Fix for regression
+        };
+
+        let final_output_weights = if  learning_task == config::LearningTask::Classification {
             // For classification, the number of classes defines the output size
             Matrix::random(config.model_dimensions, num_classes)
         } else {
@@ -87,7 +94,7 @@ impl<'a> Model<'a> {
             epochs,
             checkpoint,
             learning_rate,
-            classify,
+            learning_task: classify,
             num_heads,
             num_layers,
             batch_size,
@@ -225,7 +232,14 @@ impl<'a> Model<'a> {
 
         // Feedforward network with residual connection
         let ff_output = self.feedforward_network(&attention_residual);
-        self.layer_norm(&(attention_residual + ff_output))
+
+        if self.learning_task == config::LearningTask::Regression {
+            // ff_output // Directly return the feedforward output for regression
+            ff_output.repeat_columns(self.embed_dim)
+        } else {
+            self.layer_norm(&(attention_residual + ff_output)) // Normal residual addition for classification
+        }
+
     }
 
     pub fn forward_transformer(&self, input: &Matrix) -> Matrix {
@@ -242,7 +256,11 @@ impl<'a> Model<'a> {
             x = self.transformer_layer(&x);
         }
 
-        x
+        if self.learning_task == config::LearningTask::Classification {
+            x.dot(&self.final_output_weights) // Outputs logits (batch_size × num_classes)
+        } else {
+            x // No transformation, direct regression output
+        }
     }
 
     pub fn output_layer(&self, input: &Matrix) -> Matrix {
@@ -254,7 +272,7 @@ impl<'a> Model<'a> {
         // Aggregate gradients across the batch
         let aggregated_gradients = gradients.mean_axis(0); // (1, 512)
 
-        if self.classify {
+        if self.learning_task == config::LearningTask::Classification{
             // Classification: Final output weights are (512, num_classes)
             // Expand gradients to match (512, num_classes)
             let expanded_gradients = aggregated_gradients.broadcast(self.final_output_weights.cols); // (512, num_classes)
@@ -330,12 +348,14 @@ impl<'a> Model<'a> {
     }
 
     pub fn train(&mut self) {
-
-        if self.classify {
+        print!("Training ");
+        let start_time = Instant::now();
+        if self.learning_task == config::LearningTask::Classification{
             self.train_classification();
         } else {
             self.train_regression();
         }
+        println!(", completed in {:.2?} (hh:mm:ss.milliseconds)", start_time.elapsed() );
     }
 
     pub fn save_checkpoint(&self, path: &str) -> std::io::Result<()> {
@@ -402,8 +422,10 @@ impl<'a> Model<'a> {
     }
 
     pub fn train_classification(&mut self) {
+        print!("classification\n");
+        io::stdout().flush().unwrap();
+
         // Track training time
-        let start_time = Instant::now();
         // Progress bar setup
         let iterations: u64 = (self.epochs * (self.data_loader.training_data.rows / self.batch_size)) as u64;
         let pb = ProgressBar::new(iterations);
@@ -468,16 +490,12 @@ impl<'a> Model<'a> {
             );
         }
 
-        let elapsed_time = start_time.elapsed();
-        println!(
-            "\nTraining completed in {:.2?} (hh:mm:ss.milliseconds)",
-            elapsed_time
-        );
     }
 
     pub fn train_regression(&mut self) {
+        print!("regresession\n");
+        io::stdout().flush().unwrap();
         // Track training time
-        let start_time = Instant::now();
         let mut loss_history: Vec<f64> = Vec::new();
         let mut accuracy_history: Vec<f64> = Vec::new();
         let checkpoint_location = self.project.replace("{2}", "model_checkpoint.json");
@@ -513,6 +531,7 @@ impl<'a> Model<'a> {
                     1, // Single column for regression
                     batch_labels.iter().map(|&x| x as f64).collect(),
                 );
+
                 let mut batch_loss = 0.0;
                 for (predicted_row, target_row) in outputs.rows_iter().zip(target_batch.rows_iter()) {
                     batch_loss += predicted_row
@@ -565,12 +584,6 @@ impl<'a> Model<'a> {
 
         Model::plot_loss_curve(loss_history, lossplot_location.as_str()).expect("Failed to generate loss plot");
                
-        let elapsed_time = start_time.elapsed();
-        
-        println!(
-            "\nTraining completed in {:.2?} (hh:mm:ss.milliseconds)",
-            elapsed_time
-        );
     }
 
     // log training metrics

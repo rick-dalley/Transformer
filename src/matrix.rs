@@ -75,6 +75,10 @@ impl Matrix {
         }
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
     // Random-initialized matrix
     pub fn random(rows: usize, cols: usize) -> Self {
         use rand::thread_rng;
@@ -206,6 +210,35 @@ impl Matrix {
 
         Ok(&self.data[start..end]) // Return a slice for the row
     }
+
+
+    /// Extracts a subset of rows from the matrix and returns a new Matrix.
+    ///
+    /// # Arguments
+    /// * `start` - The starting row index (inclusive).
+    /// * `end` - The ending row index (exclusive).
+    ///
+    /// # Returns
+    /// A new `Matrix` containing only the specified rows.
+    ///
+    /// # Panics
+    /// Panics if `start` or `end` is out of bounds or if `start >= end`.
+    pub fn extract_rows(&self, start: usize, end: usize) -> Matrix {
+        if start >= end || end > self.rows {
+            panic!(
+                "Row indices out of bounds: start={}, end={}, max={}",
+                start, end, self.rows
+            );
+        }
+
+        let row_count = end - start;
+        let mut extracted_data = Vec::with_capacity(row_count * self.cols);
+
+        extracted_data.extend_from_slice(&self.data[start * self.cols..end * self.cols]);
+
+        Matrix::new(row_count, self.cols, extracted_data)
+    }
+
 
     /// Creates a row matrix (1 row, `vec.len()` columns)
     pub fn from_row(vec: Vec<f64>) -> Self {
@@ -493,6 +526,55 @@ impl Matrix {
     {
         let data: Vec<f64> = self.data.iter().map(|&x| func(x)).collect();
         Matrix::new(self.rows, self.cols, data)
+    }
+
+    pub fn standard_dev(&self, axis: usize, means: Option<&Matrix>) -> Matrix {
+        match axis {
+            0 => {
+                // Standard deviation along columns
+                let mut result = vec![0.0; self.cols];
+                let feature_means = match means {
+                    Some(m) => &m.data,  // Use provided means
+                    None => &self.mean_axis(0).data, // Compute if not provided
+                };
+
+                for row in 0..self.rows {
+                    for col in 0..self.cols {
+                        let diff = self.data[row * self.cols + col] - feature_means[col];
+                        result[col] += diff.powi(2);
+                    }
+                }
+
+                for col in 0..self.cols {
+                    result[col] = (result[col] / self.rows as f64).sqrt();
+                }
+
+                Matrix::new(1, self.cols, result)
+            }
+            _ => panic!("Unsupported axis for standard deviation"),
+        }
+    }
+
+    /// Normalizes the matrix using given means and standard deviations.
+    /// If means and standard deviations are not provided, they are computed internally.
+    pub fn normalize(&mut self, means: Option<&Matrix>, stds: Option<&Matrix>) {
+        let feature_means = match means {
+            Some(m) => m.clone(),          // Use provided means
+            None => self.mean_axis(0),     // Compute means if not provided
+        };
+
+        let feature_stds = match stds {
+            Some(s) => s.clone(),          // Use provided standard deviations
+            None => self.standard_dev(0, Some(&feature_means)), // Compute std if not provided
+        };
+
+        // Apply normalization: (X - mean) / std
+        for row in 0..self.rows {
+            for col in 0..self.cols {
+                let index = row * self.cols + col;
+                self.data[index] = (self.data[index] - feature_means.data[col]) / feature_stds.data[col];
+            }
+        }
     }
 
 
