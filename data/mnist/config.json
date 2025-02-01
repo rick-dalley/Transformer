@@ -8,7 +8,6 @@
   "check_points": 0,
   "learning_rate": 0.3,
   "vocab_size": 10000,
-  "classify": true,
   "shuffle_data": true,
   "validation_split": 0.1,
   "sequence_data": false,
