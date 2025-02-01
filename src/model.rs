@@ -272,24 +272,52 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
     }
 
 
-    pub fn update_weights(&mut self, gradients: &Matrix, learning_rate: f64) {
-        // Aggregate gradients across the batch
-        // self.task.update_weights(self, &gradients, learning_rate);
+    // pub fn update_weights(&mut self, gradients: &Matrix, learning_rate: f64) {
+    //     // Aggregate gradients across the batch
 
-        let aggregated_gradients = gradients.mean_axis(0); // (1, 512)
+    //     let aggregated_gradients = gradients.mean_axis(0); // (1, 512)
 
-        if self.learning_task == config::LearningTask::Classification {
-            // Classification: Final output weights are (512, num_classes)
-            // Expand gradients to match (512, num_classes)
-            let expanded_gradients = aggregated_gradients.broadcast(self.final_output_weights.cols).transpose(); // (512, num_classes)
-            self.final_output_weights -= expanded_gradients * learning_rate;
+    //     if self.learning_task == config::LearningTask::Classification {
+    //         let expanded_gradients = aggregated_gradients.broadcast(self.final_output_weights.cols).transpose(); // (512, num_classes)
+    //         self.final_output_weights -= expanded_gradients * learning_rate;
+    //     } else {
+    //         let transposed_gradients = aggregated_gradients.transpose(); // (512, 1)
+    //         self.final_output_weights -= transposed_gradients * learning_rate;
+    //     }
+    // }
+pub fn update_weights(&mut self, gradients: &Matrix, learning_rate: f64) {
+
+
+    // Define gradient clipping threshold
+    let clip_threshold = 1.0;
+
+    // Clip gradients to prevent explosion while maintaining shape
+    let clipped_gradients = gradients.apply(|g| g.max(-clip_threshold).min(clip_threshold));
+
+
+    // Aggregate gradients
+    let aggregated_gradients = clipped_gradients.mean_axis(0); 
+
+    if self.learning_task == config::LearningTask::Classification {
+        // Ensure shape matches (512, num_classes)
+        let expanded_gradients = aggregated_gradients.broadcast(self.final_output_weights.cols);
+        
+
+        // Fix: Transpose before subtraction if needed
+        if expanded_gradients.rows != self.final_output_weights.rows {
+            self.final_output_weights -= expanded_gradients.transpose() * learning_rate;
         } else {
-            // Regression: Final output weights are (512, 1)
-            // Transpose to match (512, 1)
-            let transposed_gradients = aggregated_gradients.transpose(); // (512, 1)
-            self.final_output_weights -= transposed_gradients * learning_rate;
+            self.final_output_weights -= expanded_gradients * learning_rate;
         }
+    } else {
+        // Regression: Ensure proper shape (512, 1)
+        let transposed_gradients = aggregated_gradients.transpose();
+
+
+        self.final_output_weights -= transposed_gradients * learning_rate;
     }
+
+}
 
     pub fn train(&mut self) {
         // Track training time
@@ -311,7 +339,6 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
             let mut total_loss = 0.0;
             let mut correct_predictions = 0;
             let mut total_samples = 0;
-
             // Shuffle training data and labels
             DataLoader::shuffle_data(&mut self.data_loader.training_data, &mut self.data_loader.training_labels);
 
@@ -351,8 +378,10 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
                 if self.learning_task == config::LearningTask::Classification {
                     // Handle classification-specific logic
                     let softmax_outputs = outputs.softmax(); // Ensure predictions are probabilities
-                    let classification_errors = self.task.backward_transformer(self, &softmax_outputs, &predictions_clone, &expanded_output_errors);
+                    let mut classification_errors = self.task.backward_transformer(self, &softmax_outputs, &predictions_clone, &expanded_output_errors);
+                    classification_errors /= self.batch_size as f64;
                     self.update_weights(&classification_errors, self.learning_rate);
+
                 } else {
                     // Handle regression logic (unchanged)
                     let attention_errors = self.task.backward_transformer(self, &outputs, &predictions_clone, &expanded_output_errors);
@@ -631,7 +660,7 @@ impl TaskTrait for ClassificationTaskImpl {
         T: TaskTrait + TrainTrait,
     {
         // Compute the gradient of the softmax output
-        let softmax_gradients = outputs.apply(|x| x * (1.0 - x)); // Derivative of softmax
+        let softmax_gradients = outputs.softmax_gradient(); // Derivative of softmax
 
         // Multiply by the output errors to get the gradients
         let gradients = &softmax_gradients * output_errors;
@@ -892,20 +921,22 @@ impl TaskTrait for RegressionTaskImpl {
 
 
 impl TrainTrait for ClassificationTaskImpl {
+
     fn compute_loss(&self, outputs: &Matrix, targets: &Matrix) -> f64 {
-        // Cross-entropy loss for classification
+
+        let batch_size = outputs.rows as f64; // Number of samples
         outputs
             .rows_iter()
             .zip(targets.rows_iter())
             .map(|(predicted, target)| {
                 -target.iter().zip(predicted.iter()).map(|(t, p)| t * p.ln()).sum::<f64>()
             })
-            .sum::<f64>()
+            .sum::<f64>() / batch_size
     }
 
     fn compute_output_errors(&self, outputs: &Matrix, targets: &Matrix) -> Matrix {
         // For classification, use softmax derivative
-        let softmax_gradients = outputs.apply(|x| x * (1.0 - x)); // Derivative of softmax
+        let softmax_gradients = outputs.softmax_gradient(); // Derivative of softmax
         &softmax_gradients * (outputs - targets) // Element-wise multiplication
     }
 
@@ -916,6 +947,11 @@ impl TrainTrait for ClassificationTaskImpl {
             .zip(labels.iter())
             .filter(|(predicted, &true_label)| Matrix::argmax_row(*predicted) == true_label)
             .count();
+
+            if labels.is_empty() {
+                return 0.0; // Prevent division by zero
+            }
+
         (correct_count as f64 / labels.len() as f64) * 100.0 // Percentage accuracy
     }
 

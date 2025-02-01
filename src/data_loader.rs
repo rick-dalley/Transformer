@@ -330,7 +330,6 @@ impl DataLoader {
             (raw_data.clone(), labels.clone())
         };
 
-
         // Step 4: Finalize data (split into training/validation)
         self.finalize_data(data, sequence_labels)
     }
@@ -403,16 +402,13 @@ impl DataLoader {
         sequence_labels: Vec<f64>
     ) -> Result<(), Box<dyn std::error::Error>> {
 
-        let mut raw_labels: Vec<usize> = if self.sequence_data {
-            sequence_labels.iter().map(|&x| x as usize).collect() // Use sequenced labels
-        } else {
-           vec![0; raw_data.rows]
-        };
+        let mut raw_labels: Vec<usize> = sequence_labels.iter().map(|&x| x as usize).collect();
 
         let mut start_time = Instant::now();
         print!("Shuffling data...rows{} x cols{}", raw_data.rows, raw_data.cols);
         DataLoader::shuffle_data(&mut raw_data, &mut raw_labels);
         println!("completed {:.2?} (hh:mm:ss.milliseconds)", start_time.elapsed());  
+        println!("First 10 labels after loading: {:?}", &raw_labels[0..10]);
 
         start_time = Instant::now();
         print!("Splitting data...");
@@ -423,6 +419,7 @@ impl DataLoader {
             self.training_data = raw_data;
             self.training_labels = raw_labels;
         }
+        println!("First 10 labels after splitting: {:?}", &self.training_labels[0..10]);
         println!("completed {:.2?} (hh:mm:ss.milliseconds)",start_time.elapsed());        
 
         Ok(())

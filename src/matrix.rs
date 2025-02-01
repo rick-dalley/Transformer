@@ -21,6 +21,7 @@
 use std::ops::Mul;
 use std::ops::MulAssign;
 use std::ops::Div;
+use std::ops::DivAssign;
 use std::ops::Add;
 use std::ops::AddAssign;
 use std::ops::Sub;
@@ -406,6 +407,45 @@ impl Matrix {
 
         Matrix::new(self.rows, self.cols, data)
     }
+
+
+    pub fn softmax_gradient(&self) -> Matrix {
+        let mut result_data = vec![0.0; self.rows * self.cols];
+
+        for row in 0..self.rows {
+            let start = row * self.cols;
+            let end = start + self.cols;
+            let row_slice = &self.data[start..end];
+
+            // Compute stable softmax for this row
+            let softmax_row = self.softmax_row(row_slice);
+
+            // Compute Jacobian matrix diagonal
+            for i in 0..self.cols {
+                for j in 0..self.cols {
+                    let s_i = softmax_row[i];
+                    let s_j = softmax_row[j];
+
+                    // Derivative for softmax
+                    let delta = if i == j {
+                        s_i * (1.0 - s_i)
+                    } else {
+                        -s_i * s_j
+                    };
+
+                    // Apply the computed gradient
+                    result_data[start + i] += delta * row_slice[j];  
+                }
+            }
+        }
+
+        Matrix {
+            rows: self.rows,
+            cols: self.cols,
+            data: result_data,
+        }
+    }
+
 
     //  Generate random Q, K, and V matrices for attention layers.
     pub fn random_with_shape(rows: usize, cols: usize) -> Self {
@@ -916,5 +956,12 @@ impl<'a> Div<f64> for &'a Matrix {
             cols: self.cols,
             data,
         }
+    }
+}
+
+impl<T: Into<f64> + Copy> DivAssign<T> for Matrix {
+    fn div_assign(&mut self, scalar: T) {
+        let scalar_f64 = scalar.into();
+        self.data.iter_mut().for_each(|x| *x /= scalar_f64);
     }
 }
