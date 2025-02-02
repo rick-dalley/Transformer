@@ -20,13 +20,21 @@ pub struct Config {
     pub epochs: usize,
     pub check_points: usize,
     pub learning_rate: f64,
+    #[serde(default = "default_logit_scaling")]
+    pub logit_scaling_factor :f64,
+
+    #[serde(default = "default_clip_threshold")]
+    pub clip_threshold: f64,
+
+    #[serde(default = "default_temperature_scaling")]
+    pub temperature_scaling: f64,
+
     pub vocab_size: usize, // Size of the vocabulary for embedding
     pub shuffle_data: bool,
     pub validation_split: f64,
 
     #[serde(default = "default_learning_task")]
     pub learning_task: LearningTask,
-    
     pub learning: String,
 
     #[serde(default = "default_sequence_data")]
@@ -84,6 +92,18 @@ fn default_label_index() -> usize {
 // Default function for Serde (to ensure it's always present)
 fn default_learning_task() -> LearningTask {
     LearningTask::Regression
+}
+
+fn default_clip_threshold() -> f64 {
+    1.0
+}
+
+fn default_temperature_scaling() -> f64 {
+    1.0
+}
+
+fn default_logit_scaling() -> f64 {
+    0.1
 }
 
 impl Config {

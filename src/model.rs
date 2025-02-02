@@ -74,6 +74,9 @@ pub struct Model<'a, T: TaskTrait + TrainTrait> {
     epochs: usize,
     checkpoint: usize,
     learning_rate: f64,
+    logit_scaling_factor :f64,
+    clip_threshold: f64,
+    temperature_scaling: f64,
     batch_size: usize,
     num_layers: usize,
     num_heads: usize,
@@ -113,6 +116,9 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
         let epochs = config.epochs;
         let checkpoint = config.checkpoint_interval;
         let learning_rate = config.learning_rate;
+        let logit_scaling_factor = config.logit_scaling_factor;
+        let temperature_scaling = config.temperature_scaling;
+        let clip_threshold = config.clip_threshold;
         let learning_task = config.learning_task;
         let num_heads = config.num_heads;
         let num_layers = config.num_layers;
@@ -154,6 +160,9 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
             epochs,
             checkpoint,
             learning_rate,
+            logit_scaling_factor,
+            clip_threshold,
+            temperature_scaling,
             learning_task,
             batch_size,
             num_heads,
@@ -271,53 +280,38 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
         input.apply(|x| (x - mean) / (variance + epsilon).sqrt())
     }
 
+    pub fn update_weights(&mut self, gradients: &Matrix, learning_rate: f64) {
 
-    // pub fn update_weights(&mut self, gradients: &Matrix, learning_rate: f64) {
-    //     // Aggregate gradients across the batch
+        // Define gradient clipping threshold
+        let clip_threshold = self.clip_threshold;
 
-    //     let aggregated_gradients = gradients.mean_axis(0); // (1, 512)
-
-    //     if self.learning_task == config::LearningTask::Classification {
-    //         let expanded_gradients = aggregated_gradients.broadcast(self.final_output_weights.cols).transpose(); // (512, num_classes)
-    //         self.final_output_weights -= expanded_gradients * learning_rate;
-    //     } else {
-    //         let transposed_gradients = aggregated_gradients.transpose(); // (512, 1)
-    //         self.final_output_weights -= transposed_gradients * learning_rate;
-    //     }
-    // }
-pub fn update_weights(&mut self, gradients: &Matrix, learning_rate: f64) {
+        // Clip gradients to prevent explosion while maintaining shape
+        let clipped_gradients = gradients.apply(|g| g.max(-clip_threshold).min(clip_threshold));
 
 
-    // Define gradient clipping threshold
-    let clip_threshold = 1.0;
+        // Aggregate gradients
+        let aggregated_gradients = clipped_gradients.mean_axis(0); 
 
-    // Clip gradients to prevent explosion while maintaining shape
-    let clipped_gradients = gradients.apply(|g| g.max(-clip_threshold).min(clip_threshold));
+        if self.learning_task == config::LearningTask::Classification {
+            // Ensure shape matches (512, num_classes)
+            let expanded_gradients = aggregated_gradients.broadcast(self.final_output_weights.cols);
+            
 
-
-    // Aggregate gradients
-    let aggregated_gradients = clipped_gradients.mean_axis(0); 
-
-    if self.learning_task == config::LearningTask::Classification {
-        // Ensure shape matches (512, num_classes)
-        let expanded_gradients = aggregated_gradients.broadcast(self.final_output_weights.cols);
-        
-
-        // Fix: Transpose before subtraction if needed
-        if expanded_gradients.rows != self.final_output_weights.rows {
-            self.final_output_weights -= expanded_gradients.transpose() * learning_rate;
+            // Fix: Transpose before subtraction if needed
+            if expanded_gradients.rows != self.final_output_weights.rows {
+                self.final_output_weights -= expanded_gradients.transpose() * learning_rate;
+            } else {
+                self.final_output_weights -= expanded_gradients * learning_rate;
+            }
         } else {
-            self.final_output_weights -= expanded_gradients * learning_rate;
+            // Regression: Ensure proper shape (512, 1)
+            let transposed_gradients = aggregated_gradients.transpose();
+
+
+            self.final_output_weights -= transposed_gradients * learning_rate;
         }
-    } else {
-        // Regression: Ensure proper shape (512, 1)
-        let transposed_gradients = aggregated_gradients.transpose();
 
-
-        self.final_output_weights -= transposed_gradients * learning_rate;
     }
-
-}
 
     pub fn train(&mut self) {
         // Track training time
@@ -356,7 +350,6 @@ pub fn update_weights(&mut self, gradients: &Matrix, learning_rate: f64) {
                 } else {
                     Matrix::new(batch_labels.len(), 1, batch_labels.iter().map(|&x| x as f64).collect()) // Keep numeric values for regression
                 };
-
                 let batch_loss = self.task.compute_loss(&outputs, &target_batch);
                 total_loss += batch_loss;
 
@@ -959,9 +952,11 @@ impl TrainTrait for ClassificationTaskImpl {
     where
         T: TaskTrait + TrainTrait,
     {
-        let logits = input.dot(&model.final_output_weights); // Corrected: Access `final_output_weights` from `model`
-        logits.softmax() // Apply softmax for classification
-    }
+        input.dot(&model.final_output_weights)
+            .apply(|x| x * model.logit_scaling_factor * model.temperature_scaling) 
+            .softmax() // Apply softmax directly
+
+     }
 
 }
 

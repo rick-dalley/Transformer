@@ -136,13 +136,7 @@ impl Matrix {
             .expect("Slice is empty")
     }
     
-    pub fn softmax_row(&self, input: &[f64]) -> Vec<f64> {
-        let max_input = input.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        let exp_values: Vec<f64> = input.iter().map(|&x| (x - max_input).exp()).collect();
-        let sum_exp = exp_values.iter().sum::<f64>();
-        exp_values.iter().map(|&x| x / sum_exp).collect()
-    }
-
+ 
     pub fn softmax(&self) -> Matrix {
         let mut result_data = Vec::new();
         
@@ -161,6 +155,14 @@ impl Matrix {
         }
     }
 
+   pub fn softmax_row(&self, input: &[f64]) -> Vec<f64> {
+        let max_input = input.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let exp_values: Vec<f64> = input.iter().map(|&x| (x - max_input).exp()).collect();
+        let sum_exp = exp_values.iter().sum::<f64>();
+        let softmax_output: Vec<f64> = exp_values.iter().map(|&x| x / sum_exp).collect();
+
+        softmax_output
+    }
 
     // Mutable access to matrix elements
     pub fn at_mut(&mut self, row: usize, col: usize) -> &mut f64 {
