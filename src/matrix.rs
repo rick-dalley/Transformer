@@ -93,6 +93,29 @@ impl Matrix {
 
         Self { rows, cols, data }
     }
+    pub fn random_range(rows: usize, cols: usize, mean: f64, std_dev: f64) -> Self {
+        use rand::thread_rng;
+        use rand_distr::{Distribution, Normal};
+
+        let normal = Normal::new(mean, std_dev).unwrap();
+        let mut rng = thread_rng();
+        let data: Vec<f64> = (0..rows * cols)
+            .map(|_| normal.sample(&mut rng))
+            .collect();
+
+        Self { rows, cols, data }
+    }
+    // Xavier (Glorot) Initialization - good for tanh, sigmoid and swish
+    pub fn xavier(rows: usize, cols: usize) -> Self {
+        let limit = (6.0 / (rows + cols) as f64).sqrt();
+        Self::random_range(rows, cols, -limit, limit)
+    }
+
+    /// He Initialization: Best for ReLU, LeakyReLU
+    pub fn he(rows: usize, cols: usize) -> Self {
+        let std_dev = (2.0 / rows as f64).sqrt();
+        Self::random_range(rows, cols, 0.0, std_dev)
+    }
 
     // Initialize_weights - neural network specific function for setting weights for the layers
     pub fn initialize_weights(&mut self, nodes_in_previous_layer: usize) {
@@ -409,44 +432,185 @@ impl Matrix {
 
         Matrix::new(self.rows, self.cols, data)
     }
+    
+pub fn softmax_gradient(&self, output_errors: &Matrix) -> Matrix {
+    let mut result_data = vec![0.0; self.rows * self.cols];
 
+    for row in 0..self.rows {
+        let start = row * self.cols;
+        let end = start + self.cols;
+        let row_slice = &self.data[start..end]; // Softmax outputs
 
-    pub fn softmax_gradient(&self) -> Matrix {
-        let mut result_data = vec![0.0; self.rows * self.cols];
+        // Compute stable softmax for this row
+        let softmax_row = self.softmax_row(row_slice);
 
-        for row in 0..self.rows {
-            let start = row * self.cols;
-            let end = start + self.cols;
-            let row_slice = &self.data[start..end];
+        // Compute Jacobian matrix
+        let mut jacobian = vec![0.0; self.cols * self.cols];
+        for i in 0..self.cols {
+            for j in 0..self.cols {
+                let s_i = softmax_row[i];
+                let s_j = softmax_row[j];
 
-            // Compute stable softmax for this row
-            let softmax_row = self.softmax_row(row_slice);
-
-            // Compute Jacobian matrix diagonal
-            for i in 0..self.cols {
-                for j in 0..self.cols {
-                    let s_i = softmax_row[i];
-                    let s_j = softmax_row[j];
-
-                    // Derivative for softmax
-                    let delta = if i == j {
-                        s_i * (1.0 - s_i)
-                    } else {
-                        -s_i * s_j
-                    };
-
-                    // Apply the computed gradient
-                    result_data[start + i] += delta * row_slice[j];  
-                }
+                // Correct softmax derivative formula
+                jacobian[i * self.cols + j] = if i == j {
+                    s_i * (1.0 - s_i) // Diagonal: s_i * (1 - s_i)
+                } else {
+                    -s_i * s_j // Off-diagonal: -s_i * s_j
+                };
             }
         }
 
-        Matrix {
-            rows: self.rows,
-            cols: self.cols,
-            data: result_data,
+        // Apply Jacobian to the **upstream gradient (output_errors)**
+        let mut grad_row = vec![0.0; self.cols];
+        let error_slice = &output_errors.data[start..end]; // Extract matching error row
+
+        for i in 0..self.cols {
+            for j in 0..self.cols {
+                grad_row[i] += jacobian[i * self.cols + j] * error_slice[j];
+            }
         }
+
+        // Store result in final matrix
+        result_data[start..end].copy_from_slice(&grad_row);
     }
+
+    Matrix {
+        rows: self.rows,
+        cols: self.cols,
+        data: result_data,
+    }
+}
+
+// pub fn softmax_gradient(&self) -> Matrix {
+//     let mut result_data = vec![0.0; self.rows * self.cols];
+
+//     for row in 0..self.rows {
+//         let start = row * self.cols;
+//         let end = start + self.cols;
+//         let row_slice = &self.data[start..end];
+
+//         // Compute stable softmax for this row
+//         let softmax_row = self.softmax_row(row_slice);
+
+//         // Compute Jacobian matrix
+//         let mut jacobian = vec![0.0; self.cols * self.cols];
+//         for i in 0..self.cols {
+//             for j in 0..self.cols {
+//                 let s_i = softmax_row[i];
+//                 let s_j = softmax_row[j];
+
+//                 // Correct softmax derivative formula
+//                 jacobian[i * self.cols + j] = if i == j {
+//                     s_i * (1.0 - s_i) // Diagonal: s_i * (1 - s_i)
+//                 } else {
+//                     -s_i * s_j // Off-diagonal: -s_i * s_j
+//                 };
+//             }
+//         }
+
+//         // Compute the gradient for this row
+//         let mut grad_row = vec![0.0; self.cols];
+//         for i in 0..self.cols {
+//             for j in 0..self.cols {
+//                 grad_row[i] += jacobian[i * self.cols + j] * softmax_row[j];
+//             }
+//         }
+
+//         // Store result in final matrix
+//         result_data[start..end].copy_from_slice(&grad_row);
+//     }
+
+//     Matrix {
+//         rows: self.rows,
+//         cols: self.cols,
+//         data: result_data,
+//     }
+// }
+
+
+// pub fn softmax_gradient(&self) -> Matrix {
+//     let mut result_data = vec![0.0; self.rows * self.cols];
+
+//     for row in 0..self.rows {
+//         let start = row * self.cols;
+//         let end = start + self.cols;
+//         let row_slice = &self.data[start..end];
+
+//         // Compute stable softmax for this row
+//         let softmax_row = self.softmax_row(row_slice);
+
+//         // Compute Jacobian matrix
+//         let mut jacobian = vec![0.0; self.cols * self.cols];
+//         for i in 0..self.cols {
+//             for j in 0..self.cols {
+//                 let s_i = softmax_row[i];
+//                 let s_j = softmax_row[j];
+
+//                 // Correct softmax gradient formula
+//                 if i == j {
+//                     jacobian[i * self.cols + j] = s_i * (1.0 - s_i);
+//                 } else {
+//                     jacobian[i * self.cols + j] = -s_i * s_j;
+//                 }
+//             }
+//         }
+
+//         // Compute the gradient for this row
+//         let mut grad_row = vec![0.0; self.cols];
+//         for i in 0..self.cols {
+//             for j in 0..self.cols {
+//                 grad_row[i] += jacobian[i * self.cols + j] * row_slice[j];
+//             }
+//         }
+
+//         // Store result in final matrix
+//         result_data[start..end].copy_from_slice(&grad_row);
+//     }
+
+//     Matrix {
+//         rows: self.rows,
+//         cols: self.cols,
+//         data: result_data,
+//     }
+// }
+
+
+    // pub fn softmax_gradient(&self) -> Matrix {
+    //     let mut result_data = vec![0.0; self.rows * self.cols];
+
+    //     for row in 0..self.rows {
+    //         let start = row * self.cols;
+    //         let end = start + self.cols;
+    //         let row_slice = &self.data[start..end];
+
+    //         // Compute stable softmax for this row
+    //         let softmax_row = self.softmax_row(row_slice);
+
+    //         // Compute Jacobian matrix diagonal
+    //         for i in 0..self.cols {
+    //             for j in 0..self.cols {
+    //                 let s_i = softmax_row[i];
+    //                 let s_j = softmax_row[j];
+
+    //                 // Derivative for softmax
+    //                 let delta = if i == j {
+    //                     s_i * (1.0 - s_i)
+    //                 } else {
+    //                     -s_i * s_j
+    //                 };
+
+    //                 // Apply the computed gradient
+    //                 result_data[start + i] += delta * row_slice[j];  
+    //             }
+    //         }
+    //     }
+
+    //     Matrix {
+    //         rows: self.rows,
+    //         cols: self.cols,
+    //         data: result_data,
+    //     }
+    // }
 
 
     //  Generate random Q, K, and V matrices for attention layers.
@@ -560,6 +724,23 @@ impl Matrix {
         self.data.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / self.data.len() as f64
     }
 
+    pub fn std_dev(&self) -> f64 {
+        let mean = self.mean();
+        let variance = self.data.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / self.data.len() as f64;
+        variance.sqrt() // Standard deviation is the square root of variance
+    }
+
+       pub fn min(&self) -> f64 {
+        self.data.iter().cloned().fold(f64::INFINITY, f64::min)
+    }
+
+    pub fn max(&self) -> f64 {
+        self.data.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+    }
+
+    pub fn sum(&self) -> f64 {
+        self.data.iter().sum()
+    }
 
     // Apply the funcion to the data
     pub fn apply<F>(&self, func: F) -> Matrix
@@ -569,6 +750,16 @@ impl Matrix {
         let data: Vec<f64> = self.data.iter().map(|&x| func(x)).collect();
         Matrix::new(self.rows, self.cols, data)
     }
+
+    pub fn apply_in_place<F>(&mut self, mut func: F)
+    where
+        F: FnMut(&mut f64),
+    {
+        for value in self.data.iter_mut() {
+            func(value);
+        }
+    }
+
 
     pub fn standard_dev(&self, axis: usize, means: Option<&Matrix>) -> Matrix {
         match axis {
@@ -595,6 +786,13 @@ impl Matrix {
             }
             _ => panic!("Unsupported axis for standard deviation"),
         }
+    }
+
+
+    pub fn compute_norm(&self) -> f64 {
+        let sum_squares: f64 = self.data.iter().map(|x| x * x).sum();
+        sum_squares.sqrt() // Return the square root of the sum of squares
+
     }
 
     /// Normalizes the matrix using given means and standard deviations.

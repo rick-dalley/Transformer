@@ -5,16 +5,13 @@
 use std::time::Instant;
 use indicatif::{ProgressBar, ProgressStyle};
 use crate::activation_functions::{self};
-use crate::config;
+use crate::{config, csv_plot};
 use crate::matrix::{Matrix, Dot};
 use crate::data_loader::DataLoader;
+use crate::training_logs;
 use serde::{Serialize, Deserialize};
 use std::fs::File;
 use std::io::{ BufWriter, Write};
-use std::fs::OpenOptions;
-use plotters::prelude::*;
-const DATA_PATH: &str = "./data/{1}/{2}";
-
 
 // enums
 pub enum TaskEnum {
@@ -24,6 +21,11 @@ pub enum TaskEnum {
 
 // Traits
 pub trait TaskTrait {
+
+    fn update_weights<T>(&self, model: &mut Model<T>, gradients: &Matrix)
+    where 
+        T: TaskTrait + TrainTrait;
+
     fn transformer_layer<T>(&self, model: &Model<T>, input: &Matrix) -> Matrix
     where
         T: TaskTrait + TrainTrait;
@@ -49,13 +51,31 @@ pub trait TaskTrait {
     where
         T: TaskTrait + TrainTrait;
 
-    fn update_weights<T>(&self, model: &mut Model<T>, gradients: &Matrix, learning_rate: f64)
-    where
-        T: TaskTrait + TrainTrait;
     
     fn feedforward_network<T>(&self, model: &Model<T>, input: &Matrix) -> Matrix
     where
         T: TaskTrait + TrainTrait;
+
+    fn multi_head_attention<T>(
+        &self, model: &Model<T>,
+        query: &Matrix,
+        key: &Matrix,
+        value: &Matrix,
+        num_heads: usize,
+        embed_dim: usize,
+    ) -> Matrix
+    where 
+        T: TaskTrait + TrainTrait;
+
+    fn scaled_dot_product_attention<T>(
+        &self, model: &Model<T>, 
+        query: &Matrix,
+        key: &Matrix,
+        value: &Matrix,
+    ) -> Matrix 
+    where 
+        T: TaskTrait + TrainTrait;
+     
 }
 
 pub trait TrainTrait {
@@ -75,13 +95,14 @@ pub struct Model<'a, T: TaskTrait + TrainTrait> {
     checkpoint: usize,
     learning_rate: f64,
     logit_scaling_factor :f64,
-    clip_threshold: f64,
     temperature_scaling: f64,
     batch_size: usize,
     num_layers: usize,
     num_heads: usize,
     embed_dim: usize,
     num_classes: usize,
+    clipping_strategy: config::ClippingStrategy,
+    clip_threshold: f64,
     output_attention_weights: Vec<Matrix>,
     ff_hidden_weights: Matrix,
     ff_output_weights: Matrix,
@@ -90,7 +111,6 @@ pub struct Model<'a, T: TaskTrait + TrainTrait> {
     learning_task: config::LearningTask,
     activation_fn: Box<dyn activation_functions::ActivationTrait>,
     derivative_fn: Box<dyn activation_functions::ActivationTrait>,
-    project: String,
     task: T, // Task-specific behavior
 }
 
@@ -106,11 +126,9 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
     pub fn from_json(
         config: &config::Config,
         data_loader: &'a mut DataLoader,
-        project_name: &str,
         task: T, // Pass the task-specific implementation
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Open the JSON file
-        let project = DATA_PATH.replace("{1}", project_name);
         let config_clone = config.clone();
         let num_classes = config.num_classes;
         let epochs = config.epochs;
@@ -118,8 +136,9 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
         let learning_rate = config.learning_rate;
         let logit_scaling_factor = config.logit_scaling_factor;
         let temperature_scaling = config.temperature_scaling;
-        let clip_threshold = config.clip_threshold;
         let learning_task = config.learning_task;
+        let clipping_strategy = config.clipping_strategy;
+        let clip_threshold = config.clip_threshold;
         let num_heads = config.num_heads;
         let num_layers = config.num_layers;
         let batch_size = config.batch_size;
@@ -134,24 +153,24 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
 
 
         let ff_hidden_weights = if learning_task == config::LearningTask::Classification {
-            Matrix::random(config.model_dimensions, config.num_classes) // Fix for classification
+            Matrix::he(config.model_dimensions, config.num_classes) // Fix for classification
         } else {
-            Matrix::random(config.model_dimensions, config.hidden_dimensions) // Fix for regression
+            Matrix::xavier(config.model_dimensions, config.hidden_dimensions) // Fix for regression
         };
 
 
         let ff_output_weights = if learning_task == config::LearningTask::Classification {
-            Matrix::random(config.hidden_dimensions, num_classes) // Fix for classification
+            Matrix::he(config.hidden_dimensions, num_classes) // Fix for classification
         } else {
-            Matrix::random(config.hidden_dimensions, 1) // Fix for regression
+            Matrix::xavier(config.hidden_dimensions, 1) // Fix for regression
         };
 
         let final_output_weights = if learning_task == config::LearningTask::Classification {
             // For classification, the number of classes defines the output size
-            Matrix::random(config.model_dimensions, num_classes)
+            Matrix::xavier(config.model_dimensions, num_classes)
         } else {
             // For regression, the output size is always 1
-            Matrix::random(config.model_dimensions, 1)
+            Matrix::xavier(config.model_dimensions, 1)
         };
 
         // Initialize the Model struct
@@ -161,7 +180,6 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
             checkpoint,
             learning_rate,
             logit_scaling_factor,
-            clip_threshold,
             temperature_scaling,
             learning_task,
             batch_size,
@@ -169,6 +187,8 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
             num_layers,
             embed_dim,
             num_classes,
+            clipping_strategy,
+            clip_threshold,
             output_attention_weights,
             ff_hidden_weights,
             ff_output_weights,
@@ -176,7 +196,6 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
             embedding_matrix,
             activation_fn,
             derivative_fn,
-            project,
             task, // Initialize task-specific behavior
         };
 
@@ -186,25 +205,6 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
     // Use activation functions in methods
     pub fn apply_activation_fn(&self, x: f64) -> f64 {
         self.activation_fn.apply(x)
-    }
-
-    // Computes query (Q), key (K), and value (V) matrices, and applies the attention formula:
-    // Attention}(Q, K, V) = softmax(QK^T / √d_k) * V
-    fn scaled_dot_product_attention(
-        &self,
-        query: &Matrix,
-        key: &Matrix,
-        value: &Matrix,
-    ) -> Matrix {
-        let d_k = query.cols as f64;
-        // Compute the attention scores
-        let scores = query.dot(&key.transpose()) / d_k.sqrt();
-
-        // Apply softmax row-wise to the attention scores
-        let attention_weights = scores.softmax(); // Calls the Matrix's softmax method on scores
-
-        // Multiply the attention weights by the value matrix
-        attention_weights.dot(value)
     }
 
     pub fn embedding(&self, input: &Vec<usize>) -> Matrix {
@@ -242,37 +242,6 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
         encoding
     }
 
-    pub fn multi_head_attention(
-        &self,
-        query: &Matrix,
-        key: &Matrix,
-        value: &Matrix,
-        num_heads: usize,
-        embed_dim: usize,
-    ) -> Matrix {
-        // Split into multiple heads
-        let head_dim = embed_dim / num_heads;
-        let mut attention_heads = Vec::new();
-
-        for head in 0..num_heads {
-            // Extract the per-head matrices
-            let q = query.extract_head(head, head_dim);
-            let k = key.extract_head(head, head_dim);
-            let v = value.extract_head(head, head_dim);
-
-            // Perform scaled dot-product attention
-            let scaled_attention = self.scaled_dot_product_attention(&q, &k, &v);
-
-            // Use the per-head output attention weights
-            let transformed = scaled_attention.dot(&self.output_attention_weights[head]);
-
-            attention_heads.push(transformed);
-        }
-
-        // Concatenate heads and return the combined result
-        Matrix::concat_heads(&attention_heads)
-    }
-
     pub fn layer_norm(&self, input: &Matrix) -> Matrix {
         let epsilon = 1e-6;
         let mean = input.mean();
@@ -280,35 +249,40 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
         input.apply(|x| (x - mean) / (variance + epsilon).sqrt())
     }
 
-    pub fn update_weights(&mut self, gradients: &Matrix, learning_rate: f64) {
 
-        // Define gradient clipping threshold
-        let clip_threshold = self.clip_threshold;
 
-        // Clip gradients to prevent explosion while maintaining shape
-        let clipped_gradients = gradients.apply(|g| g.max(-clip_threshold).min(clip_threshold));
+    pub fn update_weights(&mut self, gradients: &Matrix) {
+        
+        let mut clip_threshold = self.clip_threshold;
+        let aggregated_gradients =  match self.clipping_strategy {
+            config::ClippingStrategy::None => {
+                gradients.mean_axis(0)
+            }
+            config::ClippingStrategy::Static => {
+                let clipped_gradients = gradients.apply(|g| g.max(-clip_threshold).min(clip_threshold));
+                clipped_gradients.mean_axis(0)
+            }
+            config::ClippingStrategy::Dynamic => {
+                let grad_norm = gradients.compute_norm();
+                clip_threshold = grad_norm * 0.1;  // Clip at 10% of the norm
+                let clipped_gradients = gradients.apply(|g| g.max(-clip_threshold).min(clip_threshold));
+                clipped_gradients.mean_axis(0)
 
+            }
+        };
 
         // Aggregate gradients
-        let aggregated_gradients = clipped_gradients.mean_axis(0); 
-
         if self.learning_task == config::LearningTask::Classification {
-            // Ensure shape matches (512, num_classes)
             let expanded_gradients = aggregated_gradients.broadcast(self.final_output_weights.cols);
-            
 
-            // Fix: Transpose before subtraction if needed
             if expanded_gradients.rows != self.final_output_weights.rows {
-                self.final_output_weights -= expanded_gradients.transpose() * learning_rate;
+                self.final_output_weights -= expanded_gradients.transpose() * self.learning_rate;
             } else {
-                self.final_output_weights -= expanded_gradients * learning_rate;
+                self.final_output_weights -= expanded_gradients * self.learning_rate;
             }
         } else {
-            // Regression: Ensure proper shape (512, 1)
             let transposed_gradients = aggregated_gradients.transpose();
-
-
-            self.final_output_weights -= transposed_gradients * learning_rate;
+            self.final_output_weights -= transposed_gradients * self.learning_rate;
         }
 
     }
@@ -318,8 +292,6 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
         let start_time = Instant::now();
         let mut loss_history: Vec<f64> = Vec::new();
         let mut accuracy_history: Vec<f64> = Vec::new();
-        let checkpoint_location = self.project.replace("{2}", "model_checkpoint.json");
-        let lossplot_location = self.project.replace("{2}", "loss_plot.png");
 
         // Progress bar setup
         let iterations: u64 = (self.epochs * (self.data_loader.training_data.rows / self.batch_size)) as u64;
@@ -329,14 +301,19 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
             .unwrap()
             .progress_chars("#>-"));
 
+// Debugging
+let mut grad_norms = Vec::new(); // Store norms for plotting
+// let mut weight_norms = Vec::new(); // Store norms for plotting
+
+
         for epoch in 0..self.epochs {
             let mut total_loss = 0.0;
             let mut correct_predictions = 0;
             let mut total_samples = 0;
             // Shuffle training data and labels
             DataLoader::shuffle_data(&mut self.data_loader.training_data, &mut self.data_loader.training_labels);
-
-            for i in (0..self.data_loader.training_data.rows).step_by(self.batch_size) {
+            let rows = self.data_loader.training_data.rows;
+            for i in (0..rows).step_by(self.batch_size) {
                 // Prepare a batch of data
                 let batch_data = self.data_loader.training_data.slice(i, i + self.batch_size);
                 let batch_labels = &self.data_loader.training_labels[i..(i + self.batch_size).min(self.data_loader.training_labels.len())];
@@ -360,7 +337,6 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
 
                 // Backward pass
                 let output_errors = self.task.compute_output_errors(&outputs, &target_batch);
-
                 let expanded_output_errors = if self.learning_task == config::LearningTask::Classification {
                     output_errors.clone() 
                 } else {
@@ -368,51 +344,79 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
                 };
 
                 let predictions_clone = predictions.clone();
+
+
                 if self.learning_task == config::LearningTask::Classification {
                     // Handle classification-specific logic
                     let softmax_outputs = outputs.softmax(); // Ensure predictions are probabilities
                     let mut classification_errors = self.task.backward_transformer(self, &softmax_outputs, &predictions_clone, &expanded_output_errors);
                     classification_errors /= self.batch_size as f64;
-                    self.update_weights(&classification_errors, self.learning_rate);
+
+                    self.update_weights(&classification_errors);  // Apply weight updates
+
 
                 } else {
                     // Handle regression logic (unchanged)
                     let attention_errors = self.task.backward_transformer(self, &outputs, &predictions_clone, &expanded_output_errors);
-                    self.update_weights(&attention_errors, self.learning_rate);
+                    self.update_weights( &attention_errors);
                 }
+
+        // // DEBUGGING
+        let gradients = self.task.backward_transformer(self, &outputs, &predictions, &output_errors); // Compute gradients
+        let grad_norm = gradients.compute_norm(); // Compute norm for this batch
+        grad_norms.push(grad_norm); // Store for plotting
+
 
                 // Update progress bar
                 pb.inc(1);
-            }
+            } // batch
 
-            // Check if it's time to do a checkpoint
+
+            // Record the results of the run
+            training_logs::log_epoch_results(
+                "log_files/training_log.csv",
+                epoch,
+                total_loss,
+                correct_predictions,
+                total_samples,
+                self.final_output_weights.clone(),
+                &mut loss_history,
+                &mut accuracy_history,
+                rows,
+            );
+
+           println!("Epoch {}/{} - Loss: {:.4}", epoch + 1, self.epochs, total_loss / rows as f64);
+
+
+            // Perform periodic checkpointing
             if epoch % self.checkpoint == 0 {
-                println!("Saving...");
-                self.save_checkpoint(checkpoint_location.as_str()).expect("Failed to save model.");
+                println!("Saving model checkpoint...");
+                if let Err(e) = self.save_checkpoint("log_files/model_checkpoint.json") {
+                    eprintln!("Error saving model checkpoint: {}", e);
+                }
             }
 
-            let avg_loss = total_loss / self.data_loader.training_data.rows as f64;
-            let accuracy = (correct_predictions as f64 / total_samples as f64) * 100.0;
+            // Generate loss plot at the end of training
+            if epoch + 1 == self.epochs {
+                if let Err(e) = csv_plot::plot_loss_curve(loss_history.clone(), "log_files/loss_plot.png") {
+                    eprintln!("Failed to generate loss plot: {}", e);
+                }
+            }
 
-            loss_history.push(avg_loss);
-            accuracy_history.push(accuracy);
+        } //epoch
 
-            // Log the loss for this epoch
-            self.log_training_metrics(epoch, avg_loss, accuracy, &self.project);
+// DEBUGGING
+training_logs::log_gradient_norms(&grad_norms, "./data/fashion/norms.csv");
 
-            println!("Epoch {}/{} - Loss: {:.4}", epoch + 1, self.epochs, avg_loss);
-        }
 
-        self.plot_loss_curve(loss_history, lossplot_location.as_str())
-            .expect("Failed to generate loss plot");
-
-        let elapsed_time = start_time.elapsed();
+            let elapsed_time = start_time.elapsed();
         println!(
             "\nTraining completed in {:.2?} (hh:mm:ss.milliseconds)",
             elapsed_time
         );
     }
     
+    // save_checkpoint
     pub fn save_checkpoint(&self, path: &str) -> std::io::Result<()> {
         let checkpoint = ModelCheckpoint {
             final_output_weights: self.final_output_weights.data.clone(),
@@ -426,29 +430,63 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
         Ok(())
     }
 
+
+    // predict
+    pub fn predict(&self, input: &Matrix) -> Matrix {
+        let transformed = self.task.forward_transformer(self, input);
+        self.task.compute_final_output(self, &transformed)
+    }
+
+    pub fn evaluate(&self, filename: Option<&str>, save:bool) {
+
+        if !save {
+            return;
+        }
+
+        let predictions = self.predict(&self.data_loader.validation_data);
+        if let Some(file) = filename {
+            let file = File::create(file).expect("Failed to create prediction file");
+            let mut writer = BufWriter::new(file);
+
+            for (i, pred) in predictions.data.iter().enumerate() {
+                writeln!(writer, "Sample {}: {:?}", i + 1, pred).expect("Failed to write to file");
+            }
+
+            println!("Predictions saved to {:?}", filename);
+        } else {
+            println!("Predictions:");
+            for (i, pred) in predictions.data.iter().enumerate() {
+                println!("Sample {}: {:?}", i + 1, pred);
+            }
+        }
+    }
+
+
     pub fn print_config(&self) {
         println!("Model Configuration:");
-        println!("  Epochs: {}", self.epochs);
-        println!("  Learning Rate: {:.5}", self.learning_rate);
-        println!("  Batch Size: {}", self.batch_size);
-        println!("  Sequence Length: {}", self.data_loader.sequence_length);
-        println!("  Validation Split: {:.2}%", self.data_loader.validation_split * 100.0);
-        println!("  Split Index: {}", self.data_loader.split_index);
-        println!("  Number of Layers: {}", self.num_layers);
-        println!("  Number of Heads: {}", self.num_heads);
-        println!("  Embedding Dimension: {}", self.embed_dim);
-        println!("  Data Location: {}", self.data_loader.data_location);
 
-        // Data dimensions
+        // Data Info
+        println!("  Data Location: {}", self.data_loader.data_location);
         println!("  Training Data: {} rows x {} cols", self.data_loader.training_data.rows, self.data_loader.training_data.cols);
         if self.data_loader.cap_data_rows {
             println!("  Capped for debugging for this run");
         }
+        println!("  Training Labels: {} total", self.data_loader.training_labels.len());
+        println!("  Sequence Length: {}", self.data_loader.sequence_length);
+
+        println!("  Split Index: {}", self.data_loader.split_index);
 
         println!("  Validation Data: {} rows x {} cols", self.data_loader.validation_data.rows, self.data_loader.validation_data.cols);
-        // Labels info
-        println!("  Training Labels: {} total", self.data_loader.training_labels.len());
+        println!("  Validation Split: {:.2}%", self.data_loader.validation_split * 100.0);
         println!("  Validation Labels: {} total", self.data_loader.validation_labels.len());
+
+        // Labels info
+        println!("  Epochs: {}", self.epochs);
+        println!("  Learning Rate: {:.5}", self.learning_rate);
+        println!("  Batch Size: {}", self.batch_size);
+        println!("  Number of Layers: {}", self.num_layers);
+        println!("  Number of Heads: {}", self.num_heads);
+        println!("  Embedding Dimension: {}", self.embed_dim);
 
         // Check attention weights
         println!("  Attention Weights: {} heads", self.output_attention_weights.len());
@@ -474,61 +512,6 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
             "  Final Output Weights: {} rows x {} cols",
             self.final_output_weights.rows, self.final_output_weights.cols
         );
-    }
-
-    // log training metrics
-    pub fn log_training_metrics(&self, epoch: usize, loss: f64, accuracy: f64, project: &str) {
-        let training_log_location = project.replace("{2}", "training_log.csv");
-        let mut file = OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(training_log_location)
-            .expect("Failed to open log file");
-
-        writeln!(file, "{},{},{}", epoch, loss, accuracy).expect("Failed to write log.");
-    }
-
-    // plot loss curve
-    pub fn plot_loss_curve(&self, loss_values: Vec<f64>, location: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let root = BitMapBackend::new(&location, (800, 600)).into_drawing_area();
-        root.fill(&WHITE)?;
-
-        let mut chart = ChartBuilder::on(&root)
-            .caption("Loss Curve", ("sans-serif", 50))
-            .build_cartesian_2d(0..loss_values.len(), 0.0..loss_values.iter().cloned().fold(f64::INFINITY, f64::min))?;
-
-        chart.draw_series(LineSeries::new(
-            loss_values.iter().enumerate().map(|(i, &loss)| (i, loss)),
-            &BLUE,
-        ))?;
-
-        Ok(())
-    }
-
-    // predict
-    pub fn predict(&self, input: &Matrix) -> Matrix {
-        let transformed = self.task.forward_transformer(self, input);
-        self.task.compute_final_output(self, &transformed)
-    }
-
-    pub fn evaluate(&self, filename: Option<&str>) {
-        let predictions = self.predict(&self.data_loader.validation_data);
-
-        if let Some(file) = filename {
-            let file = File::create(file).expect("Failed to create prediction file");
-            let mut writer = BufWriter::new(file);
-
-            for (i, pred) in predictions.data.iter().enumerate() {
-                writeln!(writer, "Sample {}: {:?}", i + 1, pred).expect("Failed to write to file");
-            }
-
-            println!("Predictions saved to {:?}", filename);
-        } else {
-            println!("Predictions:");
-            for (i, pred) in predictions.data.iter().enumerate() {
-                println!("Sample {}: {:?}", i + 1, pred);
-            }
-        }
     }
 
     // Delegate to the task-specific implementation
@@ -590,13 +573,13 @@ impl TaskTrait for TaskEnum {
         }
     }
 
-    fn update_weights<T>(&self, model: &mut Model<T>, gradients: &Matrix, learning_rate: f64)
+    fn update_weights<T>(&self, model: &mut Model<T>, gradients: &Matrix, )
     where
         T: TaskTrait + TrainTrait,
     {
         match self {
-            TaskEnum::Classification(task) => task.update_weights(model, gradients, learning_rate),
-            TaskEnum::Regression(task) => task.update_weights(model, gradients, learning_rate),
+            TaskEnum::Classification(task) => task.update_weights(model, gradients),
+            TaskEnum::Regression(task) => task.update_weights(model, gradients),
         }
     }
 
@@ -610,6 +593,40 @@ impl TaskTrait for TaskEnum {
         }
     }
 
+ 
+    fn multi_head_attention<T>(
+        &self, model: &Model<T>,
+        query: &Matrix,
+        key: &Matrix,
+        value: &Matrix,
+        num_heads: usize,
+        embed_dim: usize,
+    ) -> Matrix
+    where 
+        T: TaskTrait + TrainTrait,
+    {
+        match self {
+            TaskEnum::Classification(task) => task.multi_head_attention(model, query, key, value, num_heads, embed_dim),
+            TaskEnum::Regression(task) => task.multi_head_attention(model, query, key, value, num_heads, embed_dim),
+        }
+    }
+
+    fn scaled_dot_product_attention<T>(
+        &self, model: &Model<T>, 
+        query: &Matrix,
+        key: &Matrix,
+        value: &Matrix,
+    ) -> Matrix 
+    where 
+        T: TaskTrait + TrainTrait,
+    {
+        match self {
+            TaskEnum::Classification(task) => task.scaled_dot_product_attention(model,query, key, value),
+            TaskEnum::Regression(task) => task.scaled_dot_product_attention(model, query, key, value),
+        }
+        
+    }
+
 }
 
 
@@ -618,11 +635,58 @@ pub struct ClassificationTaskImpl;
 
 impl TaskTrait for ClassificationTaskImpl {
 
+    fn scaled_dot_product_attention<T>(
+        &self, _model: &Model<T>,
+        query: &Matrix,
+        key: &Matrix,
+        value: &Matrix,
+    ) -> Matrix
+    where
+        T: TaskTrait + TrainTrait,
+    {
+        let d_k = query.cols as f64;
+
+        let scores = query.dot(&key.transpose()) / (d_k.sqrt() + 1e-8);
+
+        let attention_weights = scores.softmax();
+
+        attention_weights.dot(value)
+    }
+
+   fn multi_head_attention<T>(
+        &self, model: &Model<T>,
+        query: &Matrix,
+        key: &Matrix,
+        value: &Matrix,
+        num_heads: usize,
+        embed_dim: usize,
+    ) -> Matrix 
+     where
+        T: TaskTrait + TrainTrait,
+    {
+        let head_dim = embed_dim / num_heads;
+        let mut attention_heads = Vec::new();
+
+        for head in 0..num_heads {
+            let q = query.extract_head(head, head_dim);
+            let k = key.extract_head(head, head_dim);
+            let v = value.extract_head(head, head_dim);
+            let scaled_attention = model.task.scaled_dot_product_attention(model, &q, &k, &v);
+
+            // Classification applies learned attention weights
+            let transformed = scaled_attention.dot(&model.output_attention_weights[head]);
+
+            attention_heads.push(transformed);
+        }
+
+        Matrix::concat_heads(&attention_heads)
+    }
+
     fn transformer_layer<T>(&self, model: &Model<T>, input: &Matrix) -> Matrix
     where
         T: TaskTrait + TrainTrait, 
     {
-        let attention_output = model.multi_head_attention(input, input, input, model.num_heads, model.embed_dim);
+        let attention_output = model.task.multi_head_attention(model,input, input, input, model.num_heads, model.embed_dim);
         let residual_sum = input + &attention_output; 
         let attention_residual = model.layer_norm(&residual_sum); 
         
@@ -652,19 +716,19 @@ impl TaskTrait for ClassificationTaskImpl {
     where
         T: TaskTrait + TrainTrait,
     {
+    
         // Compute the gradient of the softmax output
-        let softmax_gradients = outputs.softmax_gradient(); // Derivative of softmax
+        let softmax_gradients = outputs.softmax_gradient(output_errors); // Derivative of softmax
 
         // Multiply by the output errors to get the gradients
         let gradients = &softmax_gradients * output_errors;
 
-        // Backpropagate through the feedforward network
+        // Backpropagate through the feedforward networka
         let ff_gradients = self.backward_feedforward(model, &gradients);
-
 
         // Backpropagate through the multi-head attention
         let attention_gradients = self.backward_multi_head_attention(model, &ff_gradients, predictions);
-        
+
         // Return the final gradients
         attention_gradients
     }
@@ -720,34 +784,40 @@ impl TaskTrait for ClassificationTaskImpl {
         attention_gradients
     }
 
-    fn update_weights<T>(&self, model: &mut Model<T>, gradients: &Matrix, learning_rate: f64)
+    fn update_weights<T>(&self, model: &mut Model<T>, gradients: &Matrix)
     where
         T: TaskTrait + TrainTrait, // Add TrainTrait bound
     {
-        // Update the final output weights for classification
-        let output_gradients = gradients.dot(&model.final_output_weights.transpose());
-        model.final_output_weights -= &output_gradients * learning_rate;
+        // Expand gradient shape to match classification output size (512, num_classes)
+        let expanded_gradients = gradients.broadcast(model.final_output_weights.cols);
 
-        // Update the feedforward network weights
+        // Fix: Ensure dimensions align before subtraction
+        if expanded_gradients.rows != model.final_output_weights.rows {
+            model.final_output_weights -= expanded_gradients.transpose() * model.learning_rate;
+        } else {
+            model.final_output_weights -= expanded_gradients * model.learning_rate;
+        }
+
+        // Update feedforward network weights
         let ff_output_gradients = gradients.dot(&model.ff_output_weights.transpose());
-        model.ff_output_weights -= &ff_output_gradients * learning_rate;
+        model.ff_output_weights -= &ff_output_gradients * model.learning_rate;
 
         let ff_hidden_gradients = gradients.dot(&model.ff_hidden_weights.transpose());
-        model.ff_hidden_weights -= &ff_hidden_gradients * learning_rate;
+        model.ff_hidden_weights -= &ff_hidden_gradients * model.learning_rate;
     }
+
 
     fn feedforward_network<T>(&self, model: &Model<T>, input: &Matrix) -> Matrix
     where
         T: TaskTrait + TrainTrait,
     {
-        let hidden = input.dot(&model.ff_hidden_weights) // (32, 512) ⋅ (512, 2048) → (32, 2048)
+        let hidden = input.dot(&model.ff_hidden_weights) 
             .apply(|x| model.apply_activation_fn(x));
-
-        hidden.dot(&model.ff_hidden_weights.transpose()) // (32, 2048) ⋅ (2048, 512) → (32, 512)
+        
+        hidden.dot(&model.ff_hidden_weights.transpose()) 
     }
 
 }
-
 
 impl TrainTrait for TaskEnum {
     fn compute_loss(&self, outputs: &Matrix, targets: &Matrix) -> f64 {
@@ -788,11 +858,60 @@ impl TrainTrait for TaskEnum {
 pub struct RegressionTaskImpl;
 
 impl TaskTrait for RegressionTaskImpl {
+
+    fn scaled_dot_product_attention<T>(
+        &self, _model: &Model<T>,
+        query: &Matrix,
+        key: &Matrix,
+        value: &Matrix,
+    ) -> Matrix
+    where
+        T: TaskTrait + TrainTrait,
+    {
+        let d_k = query.cols as f64;
+        let scores = query.dot(&key.transpose()) / (d_k.sqrt() + 1e-8);
+
+        let attention_weights = scores.clone();
+
+        attention_weights.dot(value)
+    }
+
+
+   fn multi_head_attention<T>(
+        &self, model: &Model<T>,
+        query: &Matrix,
+        key: &Matrix,
+        value: &Matrix,
+        num_heads: usize,
+        embed_dim: usize,
+    ) -> Matrix 
+     where
+        T: TaskTrait + TrainTrait,
+    {
+        let head_dim = embed_dim / num_heads;
+        let mut attention_heads = Vec::new();
+
+        for head in 0..num_heads {
+            let q = query.extract_head(head, head_dim);
+            let k = key.extract_head(head, head_dim);
+            let v = value.extract_head(head, head_dim);
+
+            let scaled_attention = model.task.scaled_dot_product_attention(model, &q, &k, &v);
+
+            // Regression does NOT apply learned weights—raw attention scores are used
+            let transformed = scaled_attention.clone();
+
+            attention_heads.push(transformed);
+        }
+
+        Matrix::concat_heads(&attention_heads)
+    }
+
     fn transformer_layer<T>(&self, model: &Model<T>, input: &Matrix) -> Matrix
     where
         T: TaskTrait + TrainTrait,
     {
-        let attention_output = model.multi_head_attention(input, input, input, model.num_heads, model.embed_dim);
+        let attention_output = model.task.multi_head_attention(model,input, input, input, model.num_heads, model.embed_dim);
         let residual_sum = input + &attention_output;
         let attention_residual = model.layer_norm(&residual_sum);
         let ff_output = model.task.feedforward_network(model, &attention_residual);
@@ -882,21 +1001,26 @@ impl TaskTrait for RegressionTaskImpl {
     }
 
 
-    fn update_weights<T>(&self, model: &mut Model<T>, gradients: &Matrix, learning_rate: f64)
+    fn update_weights<T>(&self, model: &mut Model<T>, gradients: &Matrix)
     where
         T: TaskTrait + TrainTrait,
     {
-        // Update the final output weights for regression
-        let output_gradients = gradients.dot(&model.final_output_weights.transpose());
-        model.final_output_weights -= &output_gradients * learning_rate;
+       // Regression output is a single continuous value per row (512, 1)
+        let transposed_gradients = gradients.transpose();
 
-        // Update the feedforward network weights
+        // Fix: Ensure dimensions align before subtraction
+        if transposed_gradients.rows != model.final_output_weights.rows {
+            model.final_output_weights -= transposed_gradients.transpose() * model.learning_rate;
+        } else {
+            model.final_output_weights -= transposed_gradients * model.learning_rate;
+        }
+
+        // Update feedforward network weights
         let ff_output_gradients = gradients.dot(&model.ff_output_weights.transpose());
-        model.ff_output_weights -= &ff_output_gradients * learning_rate;
+        model.ff_output_weights -= &ff_output_gradients * model.learning_rate;
 
         let ff_hidden_gradients = gradients.dot(&model.ff_hidden_weights.transpose());
-        model.ff_hidden_weights -= &ff_hidden_gradients * learning_rate;
-    }
+        model.ff_hidden_weights -= &ff_hidden_gradients * model.learning_rate;    }
 
     fn feedforward_network<T>(&self, model: &Model<T>, input: &Matrix) -> Matrix 
     where 
@@ -905,6 +1029,8 @@ impl TaskTrait for RegressionTaskImpl {
         // Use the activation function stored in self.activation_fn
         let hidden = input.dot(&model.ff_hidden_weights)
             .apply(|x| model.apply_activation_fn(x)); // Apply the dynamic activation function here
+// DEBUGGIN
+training_logs::log_activations(hidden.clone());
 
         hidden.dot(&model.ff_output_weights)
     }
@@ -928,9 +1054,8 @@ impl TrainTrait for ClassificationTaskImpl {
     }
 
     fn compute_output_errors(&self, outputs: &Matrix, targets: &Matrix) -> Matrix {
-        // For classification, use softmax derivative
-        let softmax_gradients = outputs.softmax_gradient(); // Derivative of softmax
-        &softmax_gradients * (outputs - targets) // Element-wise multiplication
+        
+        outputs - targets // Element-wise multiplication
     }
 
     fn compute_accuracy(&self, outputs: &Matrix, labels: &[usize]) -> f64 {

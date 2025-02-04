@@ -23,6 +23,7 @@ pub struct DataLoader {
     pub validation_labels: Vec<usize>,
     pub validation_split: f64,
     pub split_index:usize,
+    pub scaling_factor:f64,
     pub columns: Option<config::ColumnsConfig>,
 }
 
@@ -45,6 +46,7 @@ impl DataLoader {
         let validation_labels= vec![];
         let validation_split=config.validation_split;
         let learning_task = config.learning_task;
+        let scaling_factor = config.scaling_factor;
         Self {
             data_source,
             data_location,
@@ -61,6 +63,7 @@ impl DataLoader {
             validation_data,
             validation_labels,
             validation_split,
+            scaling_factor,
             split_index,
         }
         
@@ -428,8 +431,8 @@ impl DataLoader {
     pub fn load_from_file(&mut self, error_log_location: &str) -> Result<(), Box<dyn std::error::Error>> {
         println!("{}", error_log_location);
 
-    // Extract columns before calling `self.load_for_columns`
-    let columns = self.columns.clone();
+        // Extract columns before calling `self.load_for_columns`
+        let columns = self.columns.clone();
 
         if let Some(columns) = columns {
             // Pass `columns`, avoiding borrowing `self` mutably while it's already borrowed immutably
@@ -584,7 +587,7 @@ impl DataLoader {
                     valid = false;
                     errors.push("Invalid feature value".to_string());
                     0.0
-                }) / 255.0) // Normalize grayscale
+                }) / self.scaling_factor) // Normalize grayscale
                 .collect();
 
             if num_features.is_none() {

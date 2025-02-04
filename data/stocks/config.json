@@ -3,7 +3,7 @@
   "location": "/Users/richarddalley/Code/Rust/Transformer/data/stocks/all_stocks_5yr.csv",
   "connection_string": "",
   "cap_data_rows": true,
-  "max_data_rows": 1260,
+  "max_data_rows": 12600,
   "epochs": 1,
   "check_points": 0,
   "learning_rate": 0.3,

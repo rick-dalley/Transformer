@@ -3,18 +3,20 @@ mod data_loader;
 mod model;
 pub mod config;
 pub mod matrix;
+pub mod training_logs;
 pub mod activation_functions;
+pub mod csv_plot;
 use config::Config;
 use data_loader::DataLoader;
 use model::Model;
-// use model::{ClassificationTaskImpl, RegressionTaskImpl}; // Import task implementations
 use crate::model::{TaskEnum, ClassificationTaskImpl, RegressionTaskImpl}; 
 use config::LearningTask; 
+
 
 static DATA_PATH: &str = "./data/{1}/{2}";
 
 fn main() {
-    let project = "mnist";
+    let project = "fashion";
     let config_location = DATA_PATH.replace("{1}",project).replace("{2}", "config.json");
     let evaluation_location:String = DATA_PATH.replace("{1}",project).replace("{2}", "evaluation.json");
     let config = match Config::from_json(config_location.as_str()) {
@@ -41,7 +43,7 @@ fn main() {
     };
 
     // Create the model
-    let mut model = match Model::from_json(&config, &mut data_loader, &project, task) {
+    let mut model = match Model::from_json(&config, &mut data_loader, task) {
         Ok(model) => model,
         Err(e) => {
             eprintln!("Error creating model: {}", e);
@@ -51,5 +53,8 @@ fn main() {
 
     model.print_config();
     model.train();
-    model.evaluate(Some(&evaluation_location));
+    model.evaluate(Some(&evaluation_location), true);
+    csv_plot::plot_gradients("./data/fashion/norms.csv", "./data/fashion/norms.png", true);
 }
+
+

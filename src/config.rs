@@ -10,6 +10,13 @@ pub enum LearningTask {
     Unsupervised,
 }
 
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+pub enum ClippingStrategy {
+    None,
+    Static,
+    Dynamic,
+}
+
 #[derive(Deserialize, Clone)]
 pub struct Config {
     pub data_source:String,
@@ -20,9 +27,15 @@ pub struct Config {
     pub epochs: usize,
     pub check_points: usize,
     pub learning_rate: f64,
+
     #[serde(default = "default_logit_scaling")]
     pub logit_scaling_factor :f64,
 
+    pub clipping: usize, 
+    
+     #[serde(default = "default_clipping_strategy")]
+    pub clipping_strategy: ClippingStrategy,
+    
     #[serde(default = "default_clip_threshold")]
     pub clip_threshold: f64,
 
@@ -50,6 +63,8 @@ pub struct Config {
     #[serde(default = "default_label_index")]
     pub label_column_index: usize,
 
+    #[serde(default = "default_scaling_factor")]
+    pub scaling_factor: f64,
     pub model_dimensions: usize,
     pub hidden_dimensions: usize,
     pub activation_fn_name: String,
@@ -106,6 +121,14 @@ fn default_logit_scaling() -> f64 {
     0.1
 }
 
+fn default_scaling_factor() -> f64 {
+    1.0
+}
+
+fn default_clipping_strategy() -> ClippingStrategy{
+    ClippingStrategy::Dynamic
+}
+
 impl Config {
     // get config from the json file
     pub fn from_json(path: &str) -> Result<Self, IoError> {
@@ -116,7 +139,19 @@ impl Config {
         let learning = config.learning.to_ascii_lowercase();
         //determine `unsupervised` if there's label_index missing and the data is unstructured
         config.learning_task = Config::determine_learning(config.label_column_index, &config.columns, learning);
+        
+        config.clipping_strategy = match config.clipping {
+            0 => ClippingStrategy::None,
+            1 => ClippingStrategy::Static,
+            2 => ClippingStrategy::Dynamic,
+            _ => {
+                println!("Warning: Invalid clipping value {}. Defaulting to None.", config.clipping);
+                ClippingStrategy::None
+            }
+        };
+        
         config.sequence_data = Config::compute_sequence_data(config.sequence_data, config.learning_task);
+
         config.checkpoint_interval = Config::checkpoint_interval(config.epochs, config.check_points);
         if config.columns.is_none() {
             println!("Warning, no columns were defined.  Assuming fixed feature set.")
@@ -133,20 +168,21 @@ impl Config {
         }
     }
 
-fn determine_learning(label_column_index: usize, columns: &Option<ColumnsConfig>, learning: String) -> LearningTask {
-    if label_column_index == usize::MAX && columns.is_none() || learning == "unsupervised" {
-        return LearningTask::Unsupervised;
-    }
+    fn determine_learning(label_column_index: usize, columns: &Option<ColumnsConfig>, learning: String) -> LearningTask {
+        if label_column_index == usize::MAX && columns.is_none() || learning == "unsupervised" {
+            return LearningTask::Unsupervised;
+        }
 
-    match learning.as_str() {
-        "classification" => LearningTask::Classification,
-        "regression" => LearningTask::Regression,
-        _ => {
-            println!("Warning: Unknown learning type '{}', defaulting to Regression.", learning);
-            LearningTask::Regression
+        match learning.as_str() {
+            "classification" => LearningTask::Classification,
+            "regression" => LearningTask::Regression,
+            _ => {
+                println!("Warning: Unknown learning type '{}', defaulting to Regression.", learning);
+                LearningTask::Regression
+            }
         }
     }
-}
+    
     //checkpoint calculation
     pub fn checkpoint_interval(epochs: usize, check_points:usize) -> usize{
         let mut checkpoints = check_points;
