@@ -18,7 +18,6 @@ static DATA_PATH: &str = "./data/{1}/{2}";
 fn main() {
     let project = "fashion";
     let config_location = DATA_PATH.replace("{1}",project).replace("{2}", "config.json");
-    let evaluation_location:String = DATA_PATH.replace("{1}",project).replace("{2}", "evaluation.json");
     let config = match Config::from_json(config_location.as_str()) {
         Ok(config) => config,
         Err(e) => {
@@ -53,8 +52,7 @@ fn main() {
 
     model.print_config();
     model.train();
-    model.evaluate(Some(&evaluation_location), true);
-    csv_plot::plot_gradients("./data/fashion/norms.csv", "./data/fashion/norms.png", true);
+    // csv_plot::plot_gradients("./log_files/norms.csv", "./log_files/norms.png", true);
 }
 
 

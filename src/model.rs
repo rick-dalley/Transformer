@@ -5,13 +5,13 @@
 use std::time::Instant;
 use indicatif::{ProgressBar, ProgressStyle};
 use crate::activation_functions::{self};
-use crate::{config, csv_plot};
+use crate::{config, data_loader};
 use crate::matrix::{Matrix, Dot};
 use crate::data_loader::DataLoader;
 use crate::training_logs;
 use serde::{Serialize, Deserialize};
 use std::fs::File;
-use std::io::{ BufWriter, Write};
+use std::io::Write;
 
 // enums
 pub enum TaskEnum {
@@ -81,7 +81,7 @@ pub trait TaskTrait {
 pub trait TrainTrait {
     fn compute_loss(&self, outputs: &Matrix, targets: &Matrix) -> f64;
     fn compute_output_errors(&self, outputs: &Matrix, targets: &Matrix) -> Matrix;
-    fn compute_accuracy(&self, outputs: &Matrix, labels: &[usize]) -> f64;
+    fn compute_accuracy(&self, outputs: &Matrix, labels: &data_loader::Labels) -> f64;
     fn compute_final_output<T>(&self, model: &Model<T>, input: &Matrix) -> Matrix
     where
         T: TaskTrait + TrainTrait; // Ensure Model<T> supports both traits
@@ -301,11 +301,7 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
             .unwrap()
             .progress_chars("#>-"));
 
-// Debugging
-let mut grad_norms = Vec::new(); // Store norms for plotting
-// let mut weight_norms = Vec::new(); // Store norms for plotting
-
-
+        // for the number of epochs asked for in config.json
         for epoch in 0..self.epochs {
             let mut total_loss = 0.0;
             let mut correct_predictions = 0;
@@ -316,22 +312,29 @@ let mut grad_norms = Vec::new(); // Store norms for plotting
             for i in (0..rows).step_by(self.batch_size) {
                 // Prepare a batch of data
                 let batch_data = self.data_loader.training_data.slice(i, i + self.batch_size);
-                let batch_labels = &self.data_loader.training_labels[i..(i + self.batch_size).min(self.data_loader.training_labels.len())];
+                let batch_labels = self.data_loader.training_labels.slice(i, i + self.batch_size);
 
                 // Forward pass
                 let predictions = self.task.forward_transformer(self, &batch_data);
+
                 let outputs = self.task.compute_final_output(self, &predictions);
 
-                let target_batch = if self.learning_task == config::LearningTask::Classification {
-                    Matrix::from_labels(batch_labels, self.num_classes) // One-hot encode labels
-                } else {
-                    Matrix::new(batch_labels.len(), 1, batch_labels.iter().map(|&x| x as f64).collect()) // Keep numeric values for regression
+                let target_batch = match &batch_labels {
+                    data_loader::Labels::Classification(vec) => Matrix::from_labels(vec, self.num_classes), // One-hot encode labels
+                    data_loader::Labels::Regression(vec) => Matrix::new(vec.len(), 1, vec.clone()), // Use regression labels as is
                 };
-                let batch_loss = self.task.compute_loss(&outputs, &target_batch);
-                total_loss += batch_loss;
 
-                // Compute accuracy using the TrainTrait
-                let accuracy = self.task.compute_accuracy(&outputs, batch_labels);
+                // Debugging
+                // training_logs::log_matrix_stats(epoch, i, batch_data.clone(), "./log_files/matrix.csv", "batch_data");
+                // training_logs::log_matrix_stats(epoch, i, outputs.clone(), "./log_files/matrix.csv", "outputs");
+                // training_logs::log_matrix_stats(epoch, i, target_batch.clone(), "./log_files/matrix.csv", "target_batch");
+
+
+                let batch_loss = self.task.compute_loss(&outputs.clone(), &target_batch);
+                total_loss += batch_loss;
+                
+                let accuracy = self.task.compute_accuracy(&outputs, &batch_labels);
+
                 correct_predictions += (accuracy / 100.0 * batch_labels.len() as f64) as usize;
                 total_samples += batch_labels.len();
 
@@ -347,25 +350,19 @@ let mut grad_norms = Vec::new(); // Store norms for plotting
 
 
                 if self.learning_task == config::LearningTask::Classification {
-                    // Handle classification-specific logic
-                    let softmax_outputs = outputs.softmax(); // Ensure predictions are probabilities
-                    let mut classification_errors = self.task.backward_transformer(self, &softmax_outputs, &predictions_clone, &expanded_output_errors);
+
+                    let mut classification_errors = self.task.backward_transformer(self, &outputs, &predictions_clone, &expanded_output_errors);
+
+                    classification_errors.clip_gradients_to(1.0);
                     classification_errors /= self.batch_size as f64;
 
                     self.update_weights(&classification_errors);  // Apply weight updates
-
 
                 } else {
                     // Handle regression logic (unchanged)
                     let attention_errors = self.task.backward_transformer(self, &outputs, &predictions_clone, &expanded_output_errors);
                     self.update_weights( &attention_errors);
                 }
-
-        // // DEBUGGING
-        let gradients = self.task.backward_transformer(self, &outputs, &predictions, &output_errors); // Compute gradients
-        let grad_norm = gradients.compute_norm(); // Compute norm for this batch
-        grad_norms.push(grad_norm); // Store for plotting
-
 
                 // Update progress bar
                 pb.inc(1);
@@ -396,20 +393,10 @@ let mut grad_norms = Vec::new(); // Store norms for plotting
                 }
             }
 
-            // Generate loss plot at the end of training
-            if epoch + 1 == self.epochs {
-                if let Err(e) = csv_plot::plot_loss_curve(loss_history.clone(), "log_files/loss_plot.png") {
-                    eprintln!("Failed to generate loss plot: {}", e);
-                }
-            }
 
         } //epoch
 
-// DEBUGGING
-training_logs::log_gradient_norms(&grad_norms, "./data/fashion/norms.csv");
-
-
-            let elapsed_time = start_time.elapsed();
+        let elapsed_time = start_time.elapsed();
         println!(
             "\nTraining completed in {:.2?} (hh:mm:ss.milliseconds)",
             elapsed_time
@@ -429,38 +416,6 @@ training_logs::log_gradient_norms(&grad_norms, "./data/fashion/norms.csv");
         file.write_all(json.as_bytes())?;
         Ok(())
     }
-
-
-    // predict
-    pub fn predict(&self, input: &Matrix) -> Matrix {
-        let transformed = self.task.forward_transformer(self, input);
-        self.task.compute_final_output(self, &transformed)
-    }
-
-    pub fn evaluate(&self, filename: Option<&str>, save:bool) {
-
-        if !save {
-            return;
-        }
-
-        let predictions = self.predict(&self.data_loader.validation_data);
-        if let Some(file) = filename {
-            let file = File::create(file).expect("Failed to create prediction file");
-            let mut writer = BufWriter::new(file);
-
-            for (i, pred) in predictions.data.iter().enumerate() {
-                writeln!(writer, "Sample {}: {:?}", i + 1, pred).expect("Failed to write to file");
-            }
-
-            println!("Predictions saved to {:?}", filename);
-        } else {
-            println!("Predictions:");
-            for (i, pred) in predictions.data.iter().enumerate() {
-                println!("Sample {}: {:?}", i + 1, pred);
-            }
-        }
-    }
-
 
     pub fn print_config(&self) {
         println!("Model Configuration:");
@@ -834,7 +789,7 @@ impl TrainTrait for TaskEnum {
         }
     }
 
-    fn compute_accuracy(&self, outputs: &Matrix, labels: &[usize]) -> f64 {
+    fn compute_accuracy(&self, outputs: &Matrix,  labels: &data_loader::Labels) -> f64 {
         match self {
             TaskEnum::Classification(task) => task.compute_accuracy(outputs, labels),
             TaskEnum::Regression(task) => task.compute_accuracy(outputs, labels),
@@ -875,7 +830,6 @@ impl TaskTrait for RegressionTaskImpl {
 
         attention_weights.dot(value)
     }
-
 
    fn multi_head_attention<T>(
         &self, model: &Model<T>,
@@ -1029,8 +983,6 @@ impl TaskTrait for RegressionTaskImpl {
         // Use the activation function stored in self.activation_fn
         let hidden = input.dot(&model.ff_hidden_weights)
             .apply(|x| model.apply_activation_fn(x)); // Apply the dynamic activation function here
-// DEBUGGIN
-training_logs::log_activations(hidden.clone());
 
         hidden.dot(&model.ff_output_weights)
     }
@@ -1041,14 +993,14 @@ training_logs::log_activations(hidden.clone());
 
 impl TrainTrait for ClassificationTaskImpl {
 
-    fn compute_loss(&self, outputs: &Matrix, targets: &Matrix) -> f64 {
-
-        let batch_size = outputs.rows as f64; // Number of samples
-        outputs
+    fn compute_loss(&self, logits: &Matrix, targets: &Matrix) -> f64 {
+        let log_probs = logits.log_softmax();  // Convert logits to log probabilities
+        let batch_size = log_probs.rows as f64; // Number of samples
+        log_probs
             .rows_iter()
             .zip(targets.rows_iter())
-            .map(|(predicted, target)| {
-                -target.iter().zip(predicted.iter()).map(|(t, p)| t * p.ln()).sum::<f64>()
+            .map(|(log_prob, target)| {
+                -target.iter().zip(log_prob.iter()).map(|(t, lp)| t * lp).sum::<f64>()
             })
             .sum::<f64>() / batch_size
     }
@@ -1058,29 +1010,34 @@ impl TrainTrait for ClassificationTaskImpl {
         outputs - targets // Element-wise multiplication
     }
 
-    fn compute_accuracy(&self, outputs: &Matrix, labels: &[usize]) -> f64 {
+    fn compute_accuracy(&self, outputs: &Matrix,  labels: &data_loader::Labels) -> f64 {
         // Accuracy calculation for classification
+        let classification_labels = match labels {
+            data_loader::Labels::Classification(vec) => vec,
+            _ => panic!("compute_accuracy() called with non-classification labels"),
+        };
+
         let correct_count: usize = outputs
             .rows_iter()
-            .zip(labels.iter())
+            .zip(classification_labels.iter()) // Use extracted `Vec<usize>`
             .filter(|(predicted, &true_label)| Matrix::argmax_row(*predicted) == true_label)
             .count();
 
-            if labels.is_empty() {
-                return 0.0; // Prevent division by zero
-            }
+        if classification_labels.is_empty() {
+            return 0.0; // Prevent division by zero
+        }
 
-        (correct_count as f64 / labels.len() as f64) * 100.0 // Percentage accuracy
+        (correct_count as f64 / classification_labels.len() as f64) * 100.0 
     }
 
     fn compute_final_output<T>(&self, model: &Model<T>, input: &Matrix) -> Matrix
     where
         T: TaskTrait + TrainTrait,
     {
-        input.dot(&model.final_output_weights)
-            .apply(|x| x * model.logit_scaling_factor * model.temperature_scaling) 
-            .softmax() // Apply softmax directly
 
+            input.dot(&model.final_output_weights)
+            .apply(|x| x * model.logit_scaling_factor * model.temperature_scaling) 
+            
      }
 
 }
@@ -1102,10 +1059,11 @@ impl TrainTrait for RegressionTaskImpl {
         outputs - targets
     }
 
-    fn compute_accuracy(&self, _outputs: &Matrix, _labels: &[usize]) -> f64 {
+    fn compute_accuracy(&self, _outputs: &Matrix,  _labels: &data_loader::Labels) -> f64 {
         // Accuracy is not applicable for regression
         0.0
     }
+
     fn compute_final_output<T>(&self, model: &Model<T>, input: &Matrix) -> Matrix
     where
         T: TaskTrait + TrainTrait,

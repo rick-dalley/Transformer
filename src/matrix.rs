@@ -29,6 +29,8 @@ use std::ops::SubAssign;
 use rand_distr::Normal;
 use rand_distr::Distribution;
 
+// use crate::training_logs;
+
 pub trait Dot<Rhs = Self> {
     type Output;
 
@@ -105,9 +107,11 @@ impl Matrix {
 
         Self { rows, cols, data }
     }
+
     // Xavier (Glorot) Initialization - good for tanh, sigmoid and swish
     pub fn xavier(rows: usize, cols: usize) -> Self {
-        let limit = (6.0 / (rows + cols) as f64).sqrt();
+        let initializer = 1.5;
+        let limit = (initializer / (rows + cols) as f64).sqrt();
         Self::random_range(rows, cols, -limit, limit)
     }
 
@@ -159,16 +163,50 @@ impl Matrix {
             .expect("Slice is empty")
     }
     
- 
+    pub fn sample(&self, row:usize, n_elements:usize) -> Vec<f64> {
+        let start = row * self.cols;
+        let end = start + n_elements;
+        self.data[start..end].to_vec()
+    }
+
+    pub fn log_softmax(&self) -> Matrix {
+        let mut log_softmax_data = Vec::new();
+
+        for row in self.rows_iter() {
+            let max_val = row.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let exp_sum: f64 = row.iter().map(|&x| (x - max_val).exp()).sum();
+            let log_softmax_row: Vec<f64> = row.iter().map(|&x| (x - max_val).exp().ln() - exp_sum.ln()).collect();
+            log_softmax_data.extend(log_softmax_row);
+        }
+
+        // Construct the matrix manually
+        Matrix::new(self.rows, self.cols, log_softmax_data)
+    }
+
     pub fn softmax(&self) -> Matrix {
         let mut result_data = Vec::new();
         
         for row in 0..self.rows {
             let start = row * self.cols;
             let end = start + self.cols;
-            let row_slice = &self.data[start..end]; // Get a row slice
-            let processed_row = self.softmax_row(row_slice); // Apply the softmax function on the row
+            let row_slice = &self.data[start..end];
+
+            // Normalize logits before softmax
+            let max_logit = row_slice.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let min_logit = row_slice.iter().cloned().fold(f64::INFINITY, f64::min);
+            let range = max_logit - min_logit;
+
+            // Avoid division by zero
+            let normalized_logits: Vec<f64> = if range > 1e-6 {
+                row_slice.iter().map(|&x| (x - min_logit) / range).collect()
+            } else {
+                row_slice.iter().map(|&x| x).collect()
+            };
+
+            let processed_row = self.softmax_row(&normalized_logits);
+
             result_data.extend_from_slice(&processed_row);
+        
         }
 
         Matrix {
@@ -178,10 +216,30 @@ impl Matrix {
         }
     }
 
-   pub fn softmax_row(&self, input: &[f64]) -> Vec<f64> {
+
+    pub fn clamp_to(&mut self, min: f64, max: f64) {
+        self.data.iter_mut().for_each(|x| *x = x.max(min).min(max));
+    }
+
+    pub fn clip_gradients_to(&mut self, threshold: f64) {
+        let norm = (self.data.iter().map(|x| x * x).sum::<f64>()).sqrt();
+        if norm > threshold {
+            let scale = threshold / norm;
+            self.data.iter_mut().for_each(|x| *x *= scale);
+        }
+    }
+
+
+    pub fn softmax_row(&self, input: &[f64]) -> Vec<f64> {
+        
         let max_input = input.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        let exp_values: Vec<f64> = input.iter().map(|&x| (x - max_input).exp()).collect();
+        
+        let temperature = 0.5;
+
+        let exp_values: Vec<f64> = input.iter().map(|&x| (x - max_input).exp() * temperature).collect();
+        
         let sum_exp = exp_values.iter().sum::<f64>();
+
         let softmax_output: Vec<f64> = exp_values.iter().map(|&x| x / sum_exp).collect();
 
         softmax_output
@@ -432,7 +490,7 @@ impl Matrix {
 
         Matrix::new(self.rows, self.cols, data)
     }
-    
+
 pub fn softmax_gradient(&self, output_errors: &Matrix) -> Matrix {
     let mut result_data = vec![0.0; self.rows * self.cols];
 

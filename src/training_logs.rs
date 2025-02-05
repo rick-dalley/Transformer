@@ -1,7 +1,6 @@
 use std::io::Write;
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::sync::Once;
-
 use crate::matrix::Matrix;
 
 pub fn log_epoch_results(
@@ -41,8 +40,8 @@ pub fn log_training_metrics(
     weight_std: f64, 
     log_location: &str
 ) {
+
     static HEADER_PRINTED: Once = Once::new();
-    
     
     // Create or open the log file to append
     let mut file = OpenOptions::new()
@@ -60,53 +59,6 @@ pub fn log_training_metrics(
         .expect("Failed to write log.");
 }
 
-pub fn log_weights(epoch: usize, iteration:usize, tag:&str, weights: Matrix, log_location: &str){
-    
-    // Create or open the log file to append
-    let mut file = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(log_location)
-        .expect("Failed to open log file");
-    let mean = weights.mean();
-    let std = weights.std_dev();
-    let min = weights.min();
-    let max = weights.max();
-    let sum = weights.sum();
-    
-   // Handle potential errors from `writeln!`
-    if let Err(e) = writeln!(file, "{},{},{},{},{},{},{}, {}", epoch, iteration, tag, mean, std, min, max, sum) {
-        eprintln!("Failed to write to log file: {}", e);
-    }
-}
-
-
-pub fn log_softmax_gradient(epoch: usize, iteration:usize, gradients: Matrix, output_errors: Matrix, log_location: &str){
-    
-    // Create or open the log file to append
-    let mut file = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(log_location)
-        .expect("Failed to open log file");
-
-    let softmax_gradients = gradients.softmax_gradient(&output_errors);
-    let norm =  softmax_gradients.compute_norm();
-   // Handle potential errors from `writeln!`
-    if let Err(e) = writeln!(file, "{},{},{}", epoch, iteration, norm) {
-        eprintln!("Failed to write to log file: {}", e);
-    }
-}
-
-
-pub fn log_gradient_norms(grad_norms: &Vec<f64>, filename: &str) {
-    let mut file = File::create(filename).expect("Could not create file");
-
-    for (step, norm) in grad_norms.iter().enumerate() {
-        writeln!(file, "{},{}", step, norm).expect("Could not write to file");
-    }
-}
-
 pub fn log_matrix_norms(epoch:usize, iteration:usize, matrix: Matrix, log_location:&str){
     // Create or open the log file to append
     let mut file = OpenOptions::new()
@@ -120,81 +72,45 @@ pub fn log_matrix_norms(epoch:usize, iteration:usize, matrix: Matrix, log_locati
 
 }
 
-pub fn log_weights_update(
-    grad_norm: f64, 
-    clip_threshold: f64, 
-    learning_rate: f64, 
-    aggregated_gradients: Matrix, 
-    final_output_weights: Matrix, 
-    expanded_gradients: Matrix, 
-    final_output_weights_after: Matrix) {
-       let mut file = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open("log_files/log_weights_update.csv")
-        .expect("Failed to open log file");
- 
-    writeln!(file, "{}, {},{:?}, {}, {:?}, {:?}, {:?}", grad_norm, clip_threshold, aggregated_gradients.data.get(0..5),  learning_rate, final_output_weights.data.get(0..5), expanded_gradients.data.get(0..5), final_output_weights_after.data.get(0..5)).expect("Could not write to file");
-}
 
-pub fn log_update_weights_min_max_means(grad_norm:f64, gradients:Matrix, clipped_gradients:Matrix, aggregated_gradients: Matrix){
+pub fn log_matrix_stats(epoch:usize, iteration:usize, matrix:Matrix, log_location: &str, name:&str) {
+
     let mut file = OpenOptions::new()
         .append(true)
         .create(true)
-        .open("log_files/log_min_max_mean.csv")
+        .open(log_location)
         .expect("Failed to open log file");
+        
+
+
     static HEADER_PRINTED: Once = Once::new();
-
     HEADER_PRINTED.call_once(|| {
-        writeln!(file, "grad_norm, gradients:min, max, mean, clipped_gradients:min, max, mean, aggregated_gradients:min, max, mean")
-            .expect("Failed to write header.");
-    });
-    writeln!(file, "{}, {},{}, {}, {}, {}, {}, {}, {}, {}",  grad_norm, gradients.min(), gradients.max(), gradients.mean(), clipped_gradients.min(), clipped_gradients.max(), clipped_gradients.mean(), aggregated_gradients.min(), aggregated_gradients.max(), aggregated_gradients.mean()).expect("Could not write to file");
-}
-
-pub fn log_weight_changes(gradients:Matrix, before: Matrix, after: Matrix){
-        let mut file = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open("log_files/weight_change.csv")
-        .expect("Failed to open log file");
-
-    let delta: f64 = after.data.iter().zip(before.data.iter()).map(|(new, old)| (new - old).abs()) 
-        .sum();
-
-    let grad_mean = gradients.mean();
-    let grad_std = gradients.std_dev();
-    let grad_min = gradients.min();
-    let grad_max = gradients.max();
-    static HEADER_PRINTED: Once = Once::new();
-
-    HEADER_PRINTED.call_once(|| {
-        writeln!(file, "delta, gradients:mean, std, min, max")
-            .expect("Failed to write header.");
+        writeln!(file, "name, epoch, iteration, norm, mean, std, min, max").expect("Failed to write header.");
     });
 
-    writeln!(file, "{}, {}, {}, {}, {}",  delta, grad_mean, grad_std, grad_min, grad_max).expect("Could not write to file");
+    writeln!(file, "{}, {}, {}, {}, {}, {}, {}, {}", name, epoch, iteration, matrix.compute_norm(), matrix.mean(), matrix.std_dev(), matrix.min(), matrix.max()).expect("Could not write to file");
+
 }
 
-pub fn log_activations(hidden:Matrix) {
-        // **Log Activations**
-    let mean_activation = hidden.mean();
-    let std_activation = hidden.std_dev();
-    let min_activation = hidden.min();
-    let max_activation = hidden.max();
+pub fn log_n_elements(name:&str, slice:&Vec<f64>, n_elements:usize, log_location: &str){
 
-    // Write to a log file
     let mut file = OpenOptions::new()
         .append(true)
         .create(true)
-        .open("log_files/activations.csv")
-        .expect("Failed to open activations log file");
+        .open(log_location)
+        .expect("Failed to open log file");
 
     static HEADER_PRINTED: Once = Once::new();
     HEADER_PRINTED.call_once(|| {
-        writeln!(file, "mean, std, min, max").expect("Failed to write header.");
+        writeln!(file, "name, epoch, iteration, norm, mean, std, min, max").expect("Failed to write header.");
     });
+    writeln!(file, "{} first {}, {:?}", name,n_elements, &slice[..n_elements.min(slice.len())] ).expect("Could not write to file");
 
-    writeln!(file, "{}, {}, {}, {}", mean_activation, std_activation, min_activation, max_activation)
-        .expect("Could not write activation stats");
+}
+
+pub fn log_sample(name: &str, rows:usize, n_elements:usize, matrix:Matrix, log_location:&str){
+    for i in 0..rows.min(matrix.rows) {
+        let row_slice = matrix.sample(i, n_elements); 
+        log_n_elements(name, &row_slice, 5, log_location);
+    }
 }

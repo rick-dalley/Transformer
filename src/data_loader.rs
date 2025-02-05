@@ -1,11 +1,57 @@
-use std::time::Instant;
-
 use crate::config;
 use redis::{Commands, RedisResult};
 use postgres::{Client, NoTls};
 use csv::ReaderBuilder;
-use rand::prelude::SliceRandom;
+// use rand::prelude::SliceRandom;
 use crate::matrix::Matrix;
+use rand::seq::SliceRandom;
+
+
+#[derive(Debug)]
+pub enum Labels {
+    Classification(Vec<usize>),
+    Regression(Vec<f64>),
+}
+
+impl Labels {
+    // Get a mutable reference to Classification labels
+
+    pub fn slice(&self, start: usize, end: usize) -> Labels {
+        match self {
+            Labels::Classification(vec) => Labels::Classification(vec[start..end.min(vec.len())].to_vec()),
+            Labels::Regression(vec) => Labels::Regression(vec[start..end.min(vec.len())].to_vec()),
+        }
+    }
+
+    // Get the length of the labels vector
+    pub fn len(&self) -> usize {
+        match self {
+            Labels::Classification(vec) => vec.len(),
+            Labels::Regression(vec) => vec.len(),
+        }
+    }
+
+    // Shuffle the labels in place using a given index map
+    pub fn shuffle_with_indices(&mut self, indices: &[usize]) {
+        match self {
+            Labels::Classification(vec) => {
+                let mut shuffled = vec.clone();
+                for (i, &idx) in indices.iter().enumerate() {
+                    shuffled[i] = vec[idx];
+                }
+                *vec = shuffled;
+            }
+            Labels::Regression(vec) => {
+                let mut shuffled = vec.clone();
+                for (i, &idx) in indices.iter().enumerate() {
+                    shuffled[i] = vec[idx];
+                }
+                *vec = shuffled;
+            }
+        }
+    }
+}
+
 
 pub struct DataLoader {
     pub data_source: String,
@@ -18,9 +64,9 @@ pub struct DataLoader {
     pub sequence_length: usize,
     pub label_index: usize,
     pub training_data:Matrix,
-    pub training_labels: Vec<usize>,
     pub validation_data:Matrix,
-    pub validation_labels: Vec<usize>,
+    pub training_labels:  Labels,
+    pub validation_labels: Labels,
     pub validation_split: f64,
     pub split_index:usize,
     pub scaling_factor:f64,
@@ -41,9 +87,18 @@ impl DataLoader {
         let label_index=config.label_column_index;
         let columns=config.columns.clone(); //allow 'None' if missing
         let training_data= Matrix::zeros(0, config.sequence_length);
-        let training_labels= vec![];
         let validation_data= Matrix::zeros(0, config.sequence_length);
-        let validation_labels= vec![];
+        let training_labels = match config.learning_task {
+            config::LearningTask::Classification => Labels::Classification(vec![]),
+            config::LearningTask::Regression => Labels::Regression(vec![]),
+            _ => panic!("Unsupported learning task"),
+        };
+
+        let validation_labels = match config.learning_task {
+            config::LearningTask::Classification => Labels::Classification(vec![]),
+            config::LearningTask::Regression => Labels::Regression(vec![]),
+            _ => panic!("Unsupported learning task"),
+        };
         let validation_split=config.validation_split;
         let learning_task = config.learning_task;
         let scaling_factor = config.scaling_factor;
@@ -299,7 +354,7 @@ impl DataLoader {
     // Final processing of loaded data (shared for file, Redis, and Postgres)
     fn process_loaded_data(
         &mut self,
-        mut raw_data: Matrix,
+        raw_data: Matrix,
         labels: Vec<f64>,
         categorical_values: Vec<String>
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -308,9 +363,6 @@ impl DataLoader {
         if raw_data.is_empty() {
             return Err("No valid data to process".into());
         }
-
-        // Normalize features
-        raw_data.normalize(None, None);
 
         // Encode categorical values (if applicable)
         let categorical_indices = if !categorical_values.is_empty() {
@@ -333,8 +385,15 @@ impl DataLoader {
             (raw_data.clone(), labels.clone())
         };
 
+        println!("process_loaded_data:labels");
+        for i in 10..20 {
+            let sample = sequence_labels[i];
+            println!("{:?}", sample);            
+        }
+
         // Step 4: Finalize data (split into training/validation)
         self.finalize_data(data, sequence_labels)
+
     }
 
     fn encode_categorical_values(&self, categorical_values: &[String]) -> Vec<usize> {
@@ -405,25 +464,25 @@ impl DataLoader {
         sequence_labels: Vec<f64>
     ) -> Result<(), Box<dyn std::error::Error>> {
 
-        let mut raw_labels: Vec<usize> = sequence_labels.iter().map(|&x| x as usize).collect();
+        let mut raw_labels = if self.learning_task == config::LearningTask::Classification {
+            Labels::Classification(sequence_labels.iter().map(|&x| x as usize).collect())
+        } else {
+            Labels::Regression(sequence_labels)
+        };
 
-        let mut start_time = Instant::now();
-        print!("Shuffling data...rows{} x cols{}", raw_data.rows, raw_data.cols);
+        println!("Shuffling data...rows{} x cols{}", raw_data.rows, raw_data.cols);
         DataLoader::shuffle_data(&mut raw_data, &mut raw_labels);
-        println!("completed {:.2?} (hh:mm:ss.milliseconds)", start_time.elapsed());  
-        println!("First 10 labels after loading: {:?}", &raw_labels[0..10]);
 
-        start_time = Instant::now();
-        print!("Splitting data...");
+        println!("Splitting data...");
         if self.validation_split > 0.0 {
-            self.split_data(&raw_data, &raw_labels);
+            let (training_labels, validation_labels) = self.split_data(&raw_data, &raw_labels);
+            self.training_labels = training_labels;
+            self.validation_labels = validation_labels;
         } else {
             self.split_index = raw_data.rows;
             self.training_data = raw_data;
             self.training_labels = raw_labels;
         }
-        println!("First 10 labels after splitting: {:?}", &self.training_labels[0..10]);
-        println!("completed {:.2?} (hh:mm:ss.milliseconds)",start_time.elapsed());        
 
         Ok(())
     }
@@ -484,7 +543,10 @@ impl DataLoader {
             let mut errors = Vec::new();
 
             let features: Vec<f64> = feature_indices.iter()
-                .map(|&idx| record[idx].parse::<f64>().map_err(|_| format!("Invalid feature value in column {}", idx)))
+                .map(|&idx| record[idx].parse::<f64>()
+                    .map(|val| val / self.scaling_factor) // Apply scaling factor here
+                    .map_err(|_| format!("Invalid feature value in column {}", idx))
+                )
                 .filter_map(|res| match res {
                     Ok(val) => Some(val),
                     Err(e) => {
@@ -505,11 +567,13 @@ impl DataLoader {
                 ).into());
             }
 
-            let label = record[target_index].parse::<f64>().unwrap_or_else(|_| {
-                valid = false;
-                errors.push(format!("Invalid target value in column {}", target_index));
-                0.0
-            });
+            let label = record[target_index].parse::<f64>()
+                .map(|val| val / self.scaling_factor) // Apply scaling factor here
+                .unwrap_or_else(|_| {
+                    valid = false;
+                    errors.push(format!("Invalid target value in column {}", target_index));
+                    0.0
+                });
 
             let categorical_value = record[categorical_index].to_string();
 
@@ -524,7 +588,7 @@ impl DataLoader {
                 row_count += 1;
             }
 
-        }
+        } // process records in data file
 
         println!(
             "Loading {} rows. Skipped {} invalid rows.",
@@ -538,7 +602,14 @@ impl DataLoader {
         // Convert collected values into a `Matrix`
         let raw_data = Matrix::new(row_count, num_features.unwrap(), raw_data_values);
 
+        println!("load_for_columns:labels");
+        for i in 10..20 {
+            let sample = labels[i];
+            println!("{:?}", sample);            
+        }
+
         self.process_loaded_data(raw_data, labels, categorical_values)
+
     }
 
     fn load_for_fixed(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -626,74 +697,70 @@ impl DataLoader {
     
     }
 
-    pub fn split_data(&mut self, data:&Matrix, labels:&Vec<usize>) {
+    pub fn split_data(&mut self, data: &Matrix, labels: &Labels) -> (Labels, Labels) {
+        let split_index = ((1.0 - self.validation_split) * data.rows as f64) as usize;
 
-        // Dynamically calculate split index based on validation_split
-        self.split_index = ((1.0 - self.validation_split) * data.rows as f64) as usize;
-
-        // Ensure split_index is valid
         assert!(
-            self.split_index > 0 && self.split_index < data.rows,
+            split_index > 0 && split_index < data.rows,
             "Invalid split_index: {}. Ensure validation_split is correctly set.",
-            self.split_index
+            split_index
         );
 
-        // Split data into training and validation sets
         let data_cols = data.cols;
 
-        // Extract rows for training data
         self.training_data = Matrix::new(
-            self.split_index,
+            split_index,
             data_cols,
-            data.data[..(self.split_index * data_cols)].to_vec(),
+            data.data[..(split_index * data_cols)].to_vec(),
         );
 
-        // Extract rows for validation data
         self.validation_data = Matrix::new(
-            data.rows - self.split_index,
+            data.rows - split_index,
             data_cols,
-            data.data[(self.split_index * data_cols)..].to_vec(),
+            data.data[(split_index * data_cols)..].to_vec(),
         );
 
-        // Split labels into training and validation sets
-        self.training_labels = labels[..self.split_index].to_vec();
-        self.validation_labels = labels[self.split_index..].to_vec();
+        let (train_labels, val_labels) = match labels {
+            Labels::Classification(vec) => {
+                let (train, val) = vec.split_at(split_index);
+                (Labels::Classification(train.to_vec()), Labels::Classification(val.to_vec()))
+            }
+            Labels::Regression(vec) => {
+                let (train, val) = vec.split_at(split_index);
+                (Labels::Regression(train.to_vec()), Labels::Regression(val.to_vec()))
+            }
+        };
 
         println!(
             "Data split into training ({}) and validation ({}) sets.",
             self.training_data.rows, self.validation_data.rows
         );
-        
+
+        (train_labels, val_labels)
     }
 
-    pub fn shuffle_data(data: &mut Matrix, labels: &mut Vec<usize>) {
-
-        // Verify input alignment
+    pub fn shuffle_data(data: &mut Matrix, labels: &mut Labels) {
         assert_eq!(
             data.rows,
             labels.len(),
-            "Mismatch: data rows ({}) != labels length ({})",
-            data.rows,
-            labels.len()
+            "Mismatch: data rows != labels length"
         );
 
         let mut rng = rand::thread_rng();
         let mut indices: Vec<usize> = (0..data.rows).collect();
         indices.shuffle(&mut rng);
 
-        // In-place shuffle for both data and labels
+        // Shuffle the matrix data
         for i in 0..data.rows {
             let swap_idx = indices[i];
 
-            // Swap rows in data matrix
             for col in 0..data.cols {
                 data.data.swap(i * data.cols + col, swap_idx * data.cols + col);
             }
-
-            // Swap labels
-            labels.swap(i, swap_idx);
         }
 
+        // Shuffle labels using the indices
+        labels.shuffle_with_indices(&indices);
     }
 
 }
