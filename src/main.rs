@@ -16,7 +16,7 @@ use config::LearningTask;
 static DATA_PATH: &str = "./data/{1}/{2}";
 
 fn main() {
-    let project = "stocks";
+    let project = "fashion";
     let config_location = DATA_PATH.replace("{1}",project).replace("{2}", "config.json");
     let config = match Config::from_json(config_location.as_str()) {
         Ok(config) => config,

@@ -151,7 +151,6 @@ impl DataLoader {
     }
 
     fn load_from_redis(&mut self, error_log_location: &str) -> Result<(), Box<dyn std::error::Error>> {
-        println!("{}", error_log_location);
 
         let connection_str = self.connection_string
             .as_deref()
@@ -221,7 +220,6 @@ impl DataLoader {
 
     // Load data from PostgreSQL
     fn load_from_postgres(&mut self, error_log_location: &str) -> Result<(), Box<dyn std::error::Error>> {
-        println!("{}", error_log_location);
 
         // Ensure columns configuration is available
         let columns = self.columns.as_ref()
@@ -379,7 +377,6 @@ impl DataLoader {
             Vec::new()
         };
 
-        println!("Sequence Data? {}", self.sequence_data);
 
         // Create sequences if enabled
         let (data, sequence_labels) = if self.sequence_data {
@@ -392,12 +389,6 @@ impl DataLoader {
             //other wise proceed with the raw data
             (raw_data.clone(), labels.clone())
         };
-
-        println!("process_loaded_data:labels");
-        for i in 10..20 {
-            let sample = sequence_labels[i];
-            println!("{:?}", sample);            
-        }
 
         // Step 4: Finalize data (split into training/validation)
         self.finalize_data(data, sequence_labels)
@@ -478,7 +469,7 @@ impl DataLoader {
             Labels::Regression(sequence_labels)
         };
 
-        println!("Shuffling data...rows{} x cols{}", raw_data.rows, raw_data.cols);
+        println!("Shuffling data... {} rows x {} cols", raw_data.rows, raw_data.cols);
         DataLoader::shuffle_data(&mut raw_data, &mut raw_labels);
 
         println!("Splitting data...");
@@ -609,12 +600,6 @@ impl DataLoader {
 
         // Convert collected values into a `Matrix`
         let raw_data = Matrix::new(row_count, num_features.unwrap(), raw_data_values);
-
-        println!("load_for_columns:labels");
-        for i in 10..20 {
-            let sample = labels[i];
-            println!("{:?}", sample);            
-        }
 
         self.process_loaded_data(raw_data, labels, categorical_values)
 

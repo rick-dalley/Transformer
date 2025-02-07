@@ -122,7 +122,7 @@ pub struct Model<'a, T: TaskTrait + TrainTrait> {
     value_bias: Matrix,
     ff_hidden_bias: Matrix,
     ff_output_bias: Matrix,
-    final_output_bias: Matrix,
+    // final_output_bias: Matrix,
     ff_hidden_weights: Matrix,
     ff_output_weights: Matrix,
     final_output_weights: Matrix,
@@ -175,7 +175,11 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
         let value_weights = Matrix::xavier(embed_dim, embed_dim);
 
         let ff_hidden_weights = Matrix::he(embed_dim, embed_dim); // Expand to 4 * embed_dim
-        let ff_output_weights = Matrix::he(embed_dim, embed_dim); // Contract back to embed_dim
+        let ff_output_weights = if learning_task == config::LearningTask::Classification {
+             Matrix::he(embed_dim, num_classes)
+        } else {
+            Matrix::he(embed_dim, embed_dim)
+        }; // Contract back to embed_dim
 
         let final_output_weights = if learning_task == config::LearningTask::Classification {
             Matrix::xavier(embed_dim, num_classes) // Classification
@@ -186,13 +190,24 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
         let query_bias = Matrix::zeros(1, embed_dim);
         let key_bias = Matrix::zeros(1, embed_dim);
         let value_bias = Matrix::zeros(1, embed_dim);
-        let ff_hidden_bias = Matrix::zeros(1, embed_dim); // Match hidden layer size
-        let ff_output_bias = Matrix::zeros(1, embed_dim); // Match output size
-        let final_output_bias = if learning_task == config::LearningTask::Classification {
+
+        let ff_hidden_bias =  if learning_task == config::LearningTask::Classification {
+            Matrix::zeros(1, embed_dim) // Classification
+        } else {
+            Matrix::zeros(1, embed_dim)
+        };
+
+        let ff_output_bias =  if learning_task == config::LearningTask::Classification {
             Matrix::zeros(1, num_classes) // Classification
         } else {
-            Matrix::zeros(1, 1) // Regression
+            Matrix::zeros(1, embed_dim)
         };
+
+        // let final_output_bias = if learning_task == config::LearningTask::Classification {
+        //     Matrix::zeros(1, num_classes) // Classification
+        // } else {
+        //     Matrix::zeros(1, 1) // Regression
+        // };
 
         // Initialize the Model struct
         let model = Self {
@@ -219,7 +234,7 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
             value_bias,
             ff_hidden_bias,
             ff_output_bias,
-            final_output_bias,
+            // final_output_bias,
             ff_hidden_weights,
             ff_output_weights,
             final_output_weights,
@@ -376,8 +391,8 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
 
                 let predictions_clone = predictions.clone();
 
+                // back prop and update weights
                 if self.learning_task == config::LearningTask::Classification {
-
 
                     let (
                         mut classification_errors,
@@ -386,7 +401,8 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
                         grad_ff_output_weights,
                         grad_ff_output_bias
                     ) = self.task.backward_transformer(
-                        self, &outputs, 
+                        self, 
+                        &outputs, 
                         &predictions_clone, 
                         &expanded_output_errors, 
                         &hidden_activations, 
@@ -418,6 +434,7 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
                         &hidden_activations, 
                         &batch_data.clone()
                     );
+                    self.ff_hidden_weights = grad_hidden_weights;
                     self.ff_hidden_bias -= grad_ff_hidden_bias * self.learning_rate;
                     self.ff_output_weights -= grad_ff_output_weights * self.learning_rate;
                     self.ff_output_bias -=  grad_ff_output_bias * self.learning_rate;
@@ -722,7 +739,7 @@ impl TaskTrait for ClassificationTaskImpl {
 
         let positional_enc = model.positional_encoding(input.rows, model.embed_dim);
         let hidden_activations = x.clone();
-        x = x.add_broadcast(&positional_enc);
+        x += positional_enc;
 
         for _ in 0..model.num_layers {
             x = self.transformer_layer(model, &x);
@@ -752,7 +769,7 @@ impl TaskTrait for ClassificationTaskImpl {
 
         // Backpropagate through the feedforward networka
         let (
-            ff_gradients, 
+            grad_ff_hidden_weights, 
             grad_ff_hidden_bias, 
             grad_ff_output_weights, 
             grad_ff_output_bias, 
@@ -760,10 +777,10 @@ impl TaskTrait for ClassificationTaskImpl {
         ) = self.backward_feedforward(model, &gradients, hidden_activations, input);
 
         // Backpropagate through the multi-head attention
-        let attention_gradients = self.backward_multi_head_attention(model, &ff_gradients, predictions);
+        let attention_gradients = self.backward_multi_head_attention(model, &grad_input, predictions);
 
         // Return the final gradients
-        (attention_gradients, ff_gradients, grad_ff_hidden_bias, grad_ff_output_bias, grad_ff_output_weights)
+        (attention_gradients, grad_ff_hidden_weights, grad_ff_hidden_bias, grad_ff_output_weights, grad_ff_output_bias)
     }
 
 
