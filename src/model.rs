@@ -22,23 +22,33 @@ pub enum TaskEnum {
 // Traits
 pub trait TaskTrait {
 
-    fn update_weights<T>(&self, model: &mut Model<T>, gradients: &Matrix)
-    where 
-        T: TaskTrait + TrainTrait;
-
     fn transformer_layer<T>(&self, model: &Model<T>, input: &Matrix) -> Matrix
     where
         T: TaskTrait + TrainTrait;
 
-    fn forward_transformer<T>(&self, model: &Model<T>, input: &Matrix) -> Matrix
+    fn forward_transformer<T>(&self, model: &Model<T>, input: &Matrix) -> (Matrix, Matrix)
     where
         T: TaskTrait + TrainTrait;
 
-    fn backward_transformer<T>(&self, model: &Model<T>, outputs: &Matrix, predictions: &Matrix, output_errors: &Matrix) -> Matrix
+    fn backward_transformer<T>(
+        &self,
+        model: &Model<T>,
+        _outputs: &Matrix,
+        predictions: &Matrix,
+        output_errors: &Matrix,
+        hidden_activations: &Matrix, // Add this argument
+        input: &Matrix, // Add this argument
+    ) -> (Matrix, Matrix, Matrix, Matrix, Matrix)
     where
         T: TaskTrait + TrainTrait;
 
-    fn backward_feedforward<T>(&self, model: &Model<T>, gradients: &Matrix) -> Matrix
+    fn backward_feedforward<T>(
+        &self,
+        model: &Model<T>,
+        gradients: &Matrix, // Gradients from the next layer (dL/doutput)
+        hidden_activations: &Matrix, // Hidden layer activations (before the second linear layer)
+        input: &Matrix, // Input to the FFN
+    ) -> (Matrix, Matrix, Matrix, Matrix, Matrix)
     where
         T: TaskTrait + TrainTrait;
 
@@ -104,6 +114,15 @@ pub struct Model<'a, T: TaskTrait + TrainTrait> {
     clipping_strategy: config::ClippingStrategy,
     clip_threshold: f64,
     output_attention_weights: Vec<Matrix>,
+    query_weights: Matrix,
+    key_weights: Matrix,
+    value_weights: Matrix,
+    query_bias: Matrix,
+    key_bias: Matrix,
+    value_bias: Matrix,
+    ff_hidden_bias: Matrix,
+    ff_output_bias: Matrix,
+    final_output_bias: Matrix,
     ff_hidden_weights: Matrix,
     ff_output_weights: Matrix,
     final_output_weights: Matrix,
@@ -151,26 +170,28 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
 
         let (activation_fn, derivative_fn) = activation_functions::get_activation_and_derivative(&config_clone);
 
+        let query_weights = Matrix::xavier(embed_dim, embed_dim);
+        let key_weights = Matrix::xavier(embed_dim, embed_dim);
+        let value_weights = Matrix::xavier(embed_dim, embed_dim);
 
-        let ff_hidden_weights = if learning_task == config::LearningTask::Classification {
-            Matrix::he(config.model_dimensions, config.num_classes) // Fix for classification
-        } else {
-            Matrix::xavier(config.model_dimensions, config.hidden_dimensions) // Fix for regression
-        };
-
-
-        let ff_output_weights = if learning_task == config::LearningTask::Classification {
-            Matrix::he(config.hidden_dimensions, num_classes) // Fix for classification
-        } else {
-            Matrix::xavier(config.hidden_dimensions, 1) // Fix for regression
-        };
+        let ff_hidden_weights = Matrix::he(embed_dim, embed_dim); // Expand to 4 * embed_dim
+        let ff_output_weights = Matrix::he(embed_dim, embed_dim); // Contract back to embed_dim
 
         let final_output_weights = if learning_task == config::LearningTask::Classification {
-            // For classification, the number of classes defines the output size
-            Matrix::xavier(config.model_dimensions, num_classes)
+            Matrix::xavier(embed_dim, num_classes) // Classification
         } else {
-            // For regression, the output size is always 1
-            Matrix::xavier(config.model_dimensions, 1)
+            Matrix::xavier(embed_dim, 1) // Regression
+        };
+
+        let query_bias = Matrix::zeros(1, embed_dim);
+        let key_bias = Matrix::zeros(1, embed_dim);
+        let value_bias = Matrix::zeros(1, embed_dim);
+        let ff_hidden_bias = Matrix::zeros(1, embed_dim); // Match hidden layer size
+        let ff_output_bias = Matrix::zeros(1, embed_dim); // Match output size
+        let final_output_bias = if learning_task == config::LearningTask::Classification {
+            Matrix::zeros(1, num_classes) // Classification
+        } else {
+            Matrix::zeros(1, 1) // Regression
         };
 
         // Initialize the Model struct
@@ -190,6 +211,15 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
             clipping_strategy,
             clip_threshold,
             output_attention_weights,
+            query_weights,
+            key_weights,
+            value_weights,
+            query_bias,
+            key_bias,
+            value_bias,
+            ff_hidden_bias,
+            ff_output_bias,
+            final_output_bias,
             ff_hidden_weights,
             ff_output_weights,
             final_output_weights,
@@ -229,16 +259,21 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
         embeddings
     }
 
-    pub fn positional_encoding(&self, embed_dim: usize) -> Matrix {
-        // Create a single row of positional encoding
-        let mut encoding = Matrix::zeros(1, embed_dim); // One row for broadcasting
-        for i in 0..embed_dim {
-            if i % 2 == 0 {
-                encoding.data[i] = (0.0 / 10000f64.powf(i as f64 / embed_dim as f64)).sin();
-            } else {
-                encoding.data[i] = (0.0 / 10000f64.powf(i as f64 / embed_dim as f64)).cos();
+    // positional_encoding
+    pub fn positional_encoding(&self, seq_len: usize, embed_dim: usize) -> Matrix {
+        let mut encoding = Matrix::zeros(seq_len, embed_dim); // Each row corresponds to a position
+
+        for pos in 0..seq_len {
+            for i in 0..embed_dim {
+                let angle = pos as f64 / 10000f64.powf((i as f64) / (embed_dim as f64));
+                if i % 2 == 0 {
+                    encoding.data[pos * embed_dim + i] = angle.sin(); // Even indices: sine
+                } else {
+                    encoding.data[pos * embed_dim + i] = angle.cos(); // Odd indices: cosine
+                }
             }
         }
+
         encoding
     }
 
@@ -248,8 +283,6 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
         let variance = input.variance();
         input.apply(|x| (x - mean) / (variance + epsilon).sqrt())
     }
-
-
 
     pub fn update_weights(&mut self, gradients: &Matrix) {
         
@@ -315,19 +348,14 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
                 let batch_labels = self.data_loader.training_labels.slice(i, i + self.batch_size);
 
                 // Forward pass
-                let predictions = self.task.forward_transformer(self, &batch_data);
-
+                let (predictions, hidden_activations) = self.task.forward_transformer(self, &batch_data);
+    
                 let outputs = self.task.compute_final_output(self, &predictions);
 
                 let target_batch = match &batch_labels {
                     data_loader::Labels::Classification(vec) => Matrix::from_labels(vec, self.num_classes), // One-hot encode labels
                     data_loader::Labels::Regression(vec) => Matrix::new(vec.len(), 1, vec.clone()), // Use regression labels as is
                 };
-
-                // Debugging
-                // training_logs::log_matrix_stats(epoch, i, batch_data.clone(), "./log_files/matrix.csv", "batch_data");
-                // training_logs::log_matrix_stats(epoch, i, outputs.clone(), "./log_files/matrix.csv", "outputs");
-                // training_logs::log_matrix_stats(epoch, i, target_batch.clone(), "./log_files/matrix.csv", "target_batch");
 
 
                 let batch_loss = self.task.compute_loss(&outputs.clone(), &target_batch);
@@ -348,19 +376,51 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
 
                 let predictions_clone = predictions.clone();
 
-
                 if self.learning_task == config::LearningTask::Classification {
 
-                    let mut classification_errors = self.task.backward_transformer(self, &outputs, &predictions_clone, &expanded_output_errors);
+
+                    let (
+                        mut classification_errors,
+                        grad_ff_hidden_weights,
+                        grad_ff_hidden_bias,
+                        grad_ff_output_weights,
+                        grad_ff_output_bias
+                    ) = self.task.backward_transformer(
+                        self, &outputs, 
+                        &predictions_clone, 
+                        &expanded_output_errors, 
+                        &hidden_activations, 
+                        &batch_data.clone()
+                    );             
+
+                    self.ff_hidden_weights = grad_ff_hidden_weights * self.learning_rate;
+                    self.ff_hidden_bias -= grad_ff_hidden_bias * self.learning_rate;
+                    self.ff_output_weights -= grad_ff_output_weights * self.learning_rate;
+                    self.ff_output_bias -=  grad_ff_output_bias * self.learning_rate;
 
                     classification_errors.clip_gradients_to(1.0);
                     classification_errors /= self.batch_size as f64;
-
                     self.update_weights(&classification_errors);  // Apply weight updates
 
                 } else {
                     // Handle regression logic (unchanged)
-                    let attention_errors = self.task.backward_transformer(self, &outputs, &predictions_clone, &expanded_output_errors);
+                    let (
+                        attention_errors, 
+                        grad_hidden_weights,
+                        grad_ff_hidden_bias,
+                        grad_ff_output_weights,
+                        grad_ff_output_bias
+                    ) = self.task.backward_transformer(
+                        self, 
+                        &outputs, 
+                        &predictions_clone, 
+                        &expanded_output_errors, 
+                        &hidden_activations, 
+                        &batch_data.clone()
+                    );
+                    self.ff_hidden_bias -= grad_ff_hidden_bias * self.learning_rate;
+                    self.ff_output_weights -= grad_ff_output_weights * self.learning_rate;
+                    self.ff_output_bias -=  grad_ff_output_bias * self.learning_rate;
                     self.update_weights( &attention_errors);
                 }
 
@@ -384,7 +444,6 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
 
            println!("Epoch {}/{} - Loss: {:.4}", epoch + 1, self.epochs, total_loss / rows as f64);
 
-
             // Perform periodic checkpointing
             if epoch % self.checkpoint == 0 {
                 println!("Saving model checkpoint...");
@@ -392,7 +451,6 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
                     eprintln!("Error saving model checkpoint: {}", e);
                 }
             }
-
 
         } //epoch
 
@@ -483,7 +541,7 @@ impl TaskTrait for TaskEnum {
         }
     }
 
-    fn forward_transformer<T>(&self, model: &Model<T>, input: &Matrix) -> Matrix
+    fn forward_transformer<T>(&self, model: &Model<T>, input: &Matrix) -> (Matrix, Matrix)
     where
         T: TaskTrait + TrainTrait,
     {
@@ -493,23 +551,37 @@ impl TaskTrait for TaskEnum {
         }
     }
 
-    fn backward_transformer<T>(&self, model: &Model<T>, outputs: &Matrix, predictions: &Matrix, output_errors: &Matrix) -> Matrix
+    fn backward_transformer<T>(
+        &self,
+        model: &Model<T>,
+        _outputs: &Matrix,
+        predictions: &Matrix,
+        output_errors: &Matrix,
+        hidden_activations: &Matrix, // Add this argument
+        input: &Matrix, // Add this argument
+    ) -> (Matrix, Matrix, Matrix, Matrix, Matrix)
     where
-        T: TaskTrait + TrainTrait,
+        T: TaskTrait + TrainTrait
     {
         match self {
-            TaskEnum::Classification(task) => task.backward_transformer(model, outputs, predictions, output_errors),
-            TaskEnum::Regression(task) => task.backward_transformer(model,outputs, predictions, output_errors),
+            TaskEnum::Classification(task) => task.backward_transformer(model, _outputs, predictions, output_errors, hidden_activations, input),
+            TaskEnum::Regression(task) => task.backward_transformer(model, _outputs, predictions, output_errors, hidden_activations, input),
         }
     }
 
-    fn backward_feedforward<T>(&self, model: &Model<T>, gradients: &Matrix) -> Matrix
+    fn backward_feedforward<T>(
+        &self,
+        model: &Model<T>,
+        gradients: &Matrix, // Gradients from the next layer (dL/doutput)
+        hidden_activations: &Matrix, // Hidden layer activations (before the second linear layer)
+        input: &Matrix, // Input to the FFN
+    ) -> (Matrix, Matrix, Matrix, Matrix, Matrix)
     where
-        T: TaskTrait + TrainTrait,
+        T: TaskTrait + TrainTrait
     {
         match self {
-            TaskEnum::Classification(task) => task.backward_feedforward(model, gradients),
-            TaskEnum::Regression(task) => task.backward_feedforward(model, gradients),
+            TaskEnum::Classification(task) => task.backward_feedforward(model, gradients, hidden_activations, input),
+            TaskEnum::Regression(task) => task.backward_feedforward(model, gradients, hidden_activations, input),
         }
     }
 
@@ -525,16 +597,6 @@ impl TaskTrait for TaskEnum {
         match self {
             TaskEnum::Classification(task) => task.backward_multi_head_attention(model, gradients, predictions),
             TaskEnum::Regression(task) => task.backward_multi_head_attention(model, gradients, predictions),
-        }
-    }
-
-    fn update_weights<T>(&self, model: &mut Model<T>, gradients: &Matrix, )
-    where
-        T: TaskTrait + TrainTrait,
-    {
-        match self {
-            TaskEnum::Classification(task) => task.update_weights(model, gradients),
-            TaskEnum::Regression(task) => task.update_weights(model, gradients),
         }
     }
 
@@ -651,23 +713,33 @@ impl TaskTrait for ClassificationTaskImpl {
         model.layer_norm(&ff_residual) 
     }
 
-    fn forward_transformer<T>(&self, model: &Model<T>, input: &Matrix) -> Matrix
+    fn forward_transformer<T>(&self, model: &Model<T>, input: &Matrix) -> (Matrix, Matrix)
     where
         T: TaskTrait + TrainTrait,
     {
         let token_indices = input.column_to_indices(0);
         let mut x = model.embedding(&token_indices);
 
-        let positional_enc = model.positional_encoding(model.embed_dim);
+        let positional_enc = model.positional_encoding(input.rows, model.embed_dim);
+        let hidden_activations = x.clone();
         x = x.add_broadcast(&positional_enc);
 
         for _ in 0..model.num_layers {
             x = self.transformer_layer(model, &x);
         }
-        x
+        (x, hidden_activations)
     }
 
-    fn backward_transformer<T>(&self, model: &Model<T>, outputs: &Matrix, predictions: &Matrix, output_errors: &Matrix) -> Matrix
+    fn backward_transformer<T>
+    (
+        &self,
+        model: &Model<T>,
+        outputs: &Matrix,
+        predictions: &Matrix,
+        output_errors: &Matrix,
+        hidden_activations: &Matrix, // Add this argument
+        input: &Matrix, // Add this argument
+    ) -> (Matrix, Matrix, Matrix, Matrix, Matrix)
     where
         T: TaskTrait + TrainTrait,
     {
@@ -679,29 +751,62 @@ impl TaskTrait for ClassificationTaskImpl {
         let gradients = &softmax_gradients * output_errors;
 
         // Backpropagate through the feedforward networka
-        let ff_gradients = self.backward_feedforward(model, &gradients);
+        let (
+            ff_gradients, 
+            grad_ff_hidden_bias, 
+            grad_ff_output_weights, 
+            grad_ff_output_bias, 
+            grad_input
+        ) = self.backward_feedforward(model, &gradients, hidden_activations, input);
 
         // Backpropagate through the multi-head attention
         let attention_gradients = self.backward_multi_head_attention(model, &ff_gradients, predictions);
 
         // Return the final gradients
-        attention_gradients
+        (attention_gradients, ff_gradients, grad_ff_hidden_bias, grad_ff_output_bias, grad_ff_output_weights)
     }
 
-    fn backward_feedforward<T>(&self, model: &Model<T>, gradients: &Matrix) -> Matrix
+
+ 
+    fn backward_feedforward<T>(
+        &self,
+        model: &Model<T>,
+        gradients: &Matrix, // Gradients from the next layer (dL/doutput)
+        hidden_activations: &Matrix, // Hidden layer activations (before the second linear layer)
+        input: &Matrix, // Input to the FFN
+    ) -> (Matrix, Matrix, Matrix, Matrix, Matrix)
     where
         T: TaskTrait + TrainTrait,
     {
+        // Gradients for the second linear layer (dL/dW2)
+        let grad_ff_output_weights = hidden_activations.transpose().dot(&gradients);
 
-        let transposed = &model.ff_hidden_weights.transpose();
+        // Gradients for the output biases (dL/db2)
+        let grad_ff_output_bias = gradients.sum_rows(); // Sum over the batch dimension
 
-        // Derivatives through the second linear layer
-        let grad_ff_output_weights = gradients.dot(transposed);
+        // Gradients through the second linear layer (dL/dhidden)
+        let grad_hidden = gradients.dot(&model.ff_output_weights.transpose());
 
-        // Backpropagate activation function using the stored activation derivative function
-        let grad_hidden = grad_ff_output_weights.apply(|x| model.derivative_fn.apply(x));
+        // Gradients through the activation function (dL/dpre_activation)
+        let grad_pre_activation = grad_hidden.apply(|x| model.derivative_fn.apply(x));
 
-        grad_hidden
+        // Gradients for the first linear layer (dL/dW1)
+        let grad_ff_hidden_weights = input.transpose().dot(&grad_pre_activation);
+
+        // Gradients for the hidden biases (dL/db1)
+        let grad_ff_hidden_bias = grad_pre_activation.sum_rows(); // Sum over the batch dimension
+
+        // Gradients propagated to the previous layer (dL/dinput)
+        let grad_input = grad_pre_activation.dot(&model.ff_hidden_weights.transpose());
+
+        // Return all computed gradients
+        (
+            grad_ff_hidden_weights, // dL/dW1
+            grad_ff_hidden_bias,    // dL/db1
+            grad_ff_output_weights, // dL/dW2
+            grad_ff_output_bias,    // dL/db2
+            grad_input
+        )
     }
 
     fn backward_multi_head_attention<T>(
@@ -737,28 +842,6 @@ impl TaskTrait for ClassificationTaskImpl {
         }
 
         attention_gradients
-    }
-
-    fn update_weights<T>(&self, model: &mut Model<T>, gradients: &Matrix)
-    where
-        T: TaskTrait + TrainTrait, // Add TrainTrait bound
-    {
-        // Expand gradient shape to match classification output size (512, num_classes)
-        let expanded_gradients = gradients.broadcast(model.final_output_weights.cols);
-
-        // Fix: Ensure dimensions align before subtraction
-        if expanded_gradients.rows != model.final_output_weights.rows {
-            model.final_output_weights -= expanded_gradients.transpose() * model.learning_rate;
-        } else {
-            model.final_output_weights -= expanded_gradients * model.learning_rate;
-        }
-
-        // Update feedforward network weights
-        let ff_output_gradients = gradients.dot(&model.ff_output_weights.transpose());
-        model.ff_output_weights -= &ff_output_gradients * model.learning_rate;
-
-        let ff_hidden_gradients = gradients.dot(&model.ff_hidden_weights.transpose());
-        model.ff_hidden_weights -= &ff_hidden_gradients * model.learning_rate;
     }
 
 
@@ -824,11 +907,14 @@ impl TaskTrait for RegressionTaskImpl {
         T: TaskTrait + TrainTrait,
     {
         let d_k = query.cols as f64;
+
         let scores = query.dot(&key.transpose()) / (d_k.sqrt() + 1e-8);
 
-        let attention_weights = scores.clone();
+        let attention_weights = scores.softmax_rows();
 
-        attention_weights.dot(value)
+        let scaled_attention = attention_weights.dot(value);
+
+        scaled_attention
     }
 
    fn multi_head_attention<T>(
@@ -843,14 +929,17 @@ impl TaskTrait for RegressionTaskImpl {
         T: TaskTrait + TrainTrait,
     {
         let head_dim = embed_dim / num_heads;
+
         let mut attention_heads = Vec::new();
 
         for head in 0..num_heads {
+            // extract q, k, v
             let q = query.extract_head(head, head_dim);
             let k = key.extract_head(head, head_dim);
             let v = value.extract_head(head, head_dim);
 
             let scaled_attention = model.task.scaled_dot_product_attention(model, &q, &k, &v);
+
 
             // Regression does NOT apply learned weights—raw attention scores are used
             let transformed = scaled_attention.clone();
@@ -861,34 +950,68 @@ impl TaskTrait for RegressionTaskImpl {
         Matrix::concat_heads(&attention_heads)
     }
 
+
+    ////////////////
+    /// Transformer
     fn transformer_layer<T>(&self, model: &Model<T>, input: &Matrix) -> Matrix
     where
         T: TaskTrait + TrainTrait,
     {
-        let attention_output = model.task.multi_head_attention(model,input, input, input, model.num_heads, model.embed_dim);
+        // Compute query, key, and value
+        let query = input.dot(&model.query_weights) + model.query_bias.broadcast(input.rows);
+        let key = input.dot(&model.key_weights) + model.key_bias.broadcast(input.rows);
+        let value = input.dot(&model.value_weights) + model.value_bias.broadcast(input.rows);
+
+        // Multi-head attention
+        let attention_output = model.task.multi_head_attention(
+            model, &query, &key, &value, model.num_heads, model.embed_dim,
+        );
+
+        // Residual connection and layer normalization
         let residual_sum = input + &attention_output;
         let attention_residual = model.layer_norm(&residual_sum);
+
+        // Feedforward network
         let ff_output = model.task.feedforward_network(model, &attention_residual);
-        ff_output.repeat_columns(model.embed_dim)
+
+         // Residual connection + LayerNorm (Post-FFN)
+        let output = &attention_residual + &ff_output;
+        let output = model.layer_norm(&output);
+
+        output
     }
 
-    fn forward_transformer<T>(&self, model: &Model<T>, input: &Matrix) -> Matrix
+    fn forward_transformer<T>(&self, model: &Model<T>, input: &Matrix) -> (Matrix, Matrix)
     where
         T: TaskTrait + TrainTrait,
     {
+
         let token_indices = input.column_to_indices(0);
+
         let mut x = model.embedding(&token_indices);
-        let positional_enc = model.positional_encoding(model.embed_dim);
-        x = x.add_broadcast(&positional_enc);
+
+        let positional_enc = model.positional_encoding(input.rows, model.embed_dim);
+
+        x += positional_enc;
+    
+        let hidden_activations = x.clone(); // Store activations before 2nd linear layer
 
         for _ in 0..model.num_layers {
             x = self.transformer_layer(model, &x);
         }
 
-        x
+        (x, hidden_activations)
     }
 
-   fn backward_transformer<T>(&self, model: &Model<T>, _outputs: &Matrix, predictions: &Matrix, output_errors: &Matrix) -> Matrix
+    fn backward_transformer<T>(
+        &self,
+        model: &Model<T>,
+        _outputs: &Matrix,
+        predictions: &Matrix,
+        output_errors: &Matrix,
+        hidden_activations: &Matrix, // Add this argument
+        input: &Matrix, // Add this argument
+    ) -> (Matrix, Matrix, Matrix, Matrix, Matrix)
     where
         T: TaskTrait + TrainTrait,
     {
@@ -896,27 +1019,60 @@ impl TaskTrait for RegressionTaskImpl {
         let gradients = output_errors.clone();
 
         // Backpropagate through the feedforward network
-        let ff_gradients = self.backward_feedforward(model, &gradients);
+        let (
+            grad_ff_hidden_weights, 
+            grad_ff_hidden_bias, 
+            grad_ff_output_weights, 
+            grad_ff_output_bias,
+            grad_input
+        ) = self.backward_feedforward(model, &gradients, hidden_activations, input);
 
         // Backpropagate through the multi-head attention
-        let attention_gradients = self.backward_multi_head_attention(model, &ff_gradients, predictions);
+        let attention_gradients = self.backward_multi_head_attention(model, &grad_input, predictions);
 
         // Return the final gradients
-        attention_gradients
+        (attention_gradients, grad_ff_hidden_weights, grad_ff_hidden_bias, grad_ff_output_weights, grad_ff_output_bias)
     }
 
-
-   fn backward_feedforward<T>(&self, model: &Model<T>, gradients: &Matrix) -> Matrix
+    fn backward_feedforward<T>(
+        &self,
+        model: &Model<T>,
+        gradients: &Matrix, // Gradients from the next layer (dL/doutput)
+        hidden_activations: &Matrix, // Hidden layer activations (before the second linear layer)
+        input: &Matrix, // Input to the FFN
+    ) -> (Matrix, Matrix, Matrix, Matrix, Matrix)
     where
         T: TaskTrait + TrainTrait,
     {
-        // Derivatives through the second linear layer
-        let grad_ff_output_weights = gradients.dot(&model.ff_hidden_weights);
+        // Gradients for the second linear layer (dL/dW2)
+        let grad_ff_output_weights = hidden_activations.transpose().dot(&gradients);
 
-        // Backpropagate activation function using the stored activation derivative function
-        let grad_hidden = grad_ff_output_weights.apply(|x| model.derivative_fn.apply(x));
+        // Gradients for the output biases (dL/db2)
+        let grad_ff_output_bias = gradients.sum_rows(); // Sum over the batch dimension
 
-        grad_hidden.dot(&model.ff_hidden_weights.transpose())
+        // Gradients through the second linear layer (dL/dhidden)
+        let grad_hidden = gradients.dot(&model.ff_output_weights.transpose());
+
+        // Gradients through the activation function (dL/dpre_activation)
+        let grad_pre_activation = grad_hidden.apply(|x| model.derivative_fn.apply(x));
+
+        // Gradients for the first linear layer (dL/dW1)
+        let grad_ff_hidden_weights = input.transpose().dot(&grad_pre_activation);
+
+        // Gradients for the hidden biases (dL/db1)
+        let grad_ff_hidden_bias = grad_pre_activation.sum_rows(); // Sum over the batch dimension
+
+        // Gradients propagated to the previous layer (dL/dinput)
+        let grad_input = grad_pre_activation.dot(&model.ff_hidden_weights.transpose());
+
+        // Return all computed gradients
+        (
+            grad_ff_hidden_weights, // dL/dW1
+            grad_ff_hidden_bias,    // dL/db1
+            grad_ff_output_weights, // dL/dW2
+            grad_ff_output_bias,    // dL/db2
+            grad_input
+        )
     }
 
     fn backward_multi_head_attention<T>(
@@ -934,11 +1090,12 @@ impl TaskTrait for RegressionTaskImpl {
         for head in 0..model.num_heads {
             // Extract gradients for this head
             let grad_attention = gradients.extract_head(head, head_dim);
-
             // Compute gradients for queries, keys, and values
             let grad_query = grad_attention.dot(&model.output_attention_weights[head].transpose());
             let pred_head = predictions.extract_head(head, head_dim);
+            
             let grad_key = grad_attention.transpose().dot(&pred_head);
+
             // Map grad_key back to embedding space
             let grad_key_reduced = pred_head.dot(&grad_key.transpose());
 
@@ -954,40 +1111,23 @@ impl TaskTrait for RegressionTaskImpl {
         attention_gradients
     }
 
-
-    fn update_weights<T>(&self, model: &mut Model<T>, gradients: &Matrix)
-    where
-        T: TaskTrait + TrainTrait,
-    {
-       // Regression output is a single continuous value per row (512, 1)
-        let transposed_gradients = gradients.transpose();
-
-        // Fix: Ensure dimensions align before subtraction
-        if transposed_gradients.rows != model.final_output_weights.rows {
-            model.final_output_weights -= transposed_gradients.transpose() * model.learning_rate;
-        } else {
-            model.final_output_weights -= transposed_gradients * model.learning_rate;
-        }
-
-        // Update feedforward network weights
-        let ff_output_gradients = gradients.dot(&model.ff_output_weights.transpose());
-        model.ff_output_weights -= &ff_output_gradients * model.learning_rate;
-
-        let ff_hidden_gradients = gradients.dot(&model.ff_hidden_weights.transpose());
-        model.ff_hidden_weights -= &ff_hidden_gradients * model.learning_rate;    }
-
+    // feedforward_network
     fn feedforward_network<T>(&self, model: &Model<T>, input: &Matrix) -> Matrix 
     where 
         T: TaskTrait + TrainTrait
     {
-        // Use the activation function stored in self.activation_fn
-        let hidden = input.dot(&model.ff_hidden_weights)
-            .apply(|x| model.apply_activation_fn(x)); // Apply the dynamic activation function here
+        // First linear transformation: input (batch_size, model_dim) -> hidden (batch_size, hidden_dim)
+        let hidden = input.dot(&model.ff_hidden_weights) + model.ff_hidden_bias.broadcast(input.rows);
+        
+        // Activation function
+        let hidden = hidden.map(|x| x.max(0.0)); // ReLU
 
-        hidden.dot(&model.ff_output_weights)
+        // Second linear transformation: hidden (batch_size, hidden_dim) -> output (batch_size, model_dim)
+        let output = hidden.dot(&model.ff_output_weights) + model.ff_output_bias.broadcast(input.rows);
+
+        output // (32 × 512), ensuring residual connection compatibility
     }
-
-
+    
 }
 
 

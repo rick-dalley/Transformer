@@ -73,8 +73,10 @@ pub fn log_matrix_norms(epoch:usize, iteration:usize, matrix: Matrix, log_locati
 }
 
 
-pub fn log_matrix_stats(epoch:usize, iteration:usize, matrix:Matrix, log_location: &str, name:&str) {
-
+pub fn log_matrix_stats(epoch:usize, iteration:usize, matrix:Matrix, log_location: &str, name:&str, squelch:bool) {
+    if squelch {
+        return;
+    }
     let mut file = OpenOptions::new()
         .append(true)
         .create(true)
@@ -100,17 +102,16 @@ pub fn log_n_elements(name:&str, slice:&Vec<f64>, n_elements:usize, log_location
         .open(log_location)
         .expect("Failed to open log file");
 
-    static HEADER_PRINTED: Once = Once::new();
-    HEADER_PRINTED.call_once(|| {
-        writeln!(file, "name, epoch, iteration, norm, mean, std, min, max").expect("Failed to write header.");
-    });
     writeln!(file, "{} first {}, {:?}", name,n_elements, &slice[..n_elements.min(slice.len())] ).expect("Could not write to file");
 
 }
 
-pub fn log_sample(name: &str, rows:usize, n_elements:usize, matrix:Matrix, log_location:&str){
+pub fn log_sample(name: &str, rows:usize, n_elements:usize, matrix:Matrix, log_location:&str, squelch:bool){
+    if squelch {
+        return;
+    }
     for i in 0..rows.min(matrix.rows) {
         let row_slice = matrix.sample(i, n_elements); 
-        log_n_elements(name, &row_slice, 5, log_location);
+        log_n_elements(name, &row_slice, rows, log_location);
     }
 }

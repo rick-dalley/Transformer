@@ -31,6 +31,14 @@ impl Labels {
         }
     }
 
+    /// Returns a reference to the regression vector or an empty slice if it's Classification.
+    pub fn as_vec_f64(&self) -> Vec<f64> {
+        match self {
+            Labels::Regression(vec) => vec.clone(),
+            Labels::Classification(vec) => vec.iter().map(|&v| v as f64).collect(),
+        }
+    }
+
     // Shuffle the labels in place using a given index map
     pub fn shuffle_with_indices(&mut self, indices: &[usize]) {
         match self {
