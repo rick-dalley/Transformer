@@ -32,6 +32,7 @@ impl Labels {
     }
 
     /// Returns a reference to the regression vector or an empty slice if it's Classification.
+    #[allow(dead_code)]
     pub fn as_vec_f64(&self) -> Vec<f64> {
         match self {
             Labels::Regression(vec) => vec.clone(),
@@ -151,7 +152,7 @@ impl DataLoader {
     }
 
     fn load_from_redis(&mut self, error_log_location: &str) -> Result<(), Box<dyn std::error::Error>> {
-
+        println!("{}", error_log_location);
         let connection_str = self.connection_string
             .as_deref()
             .ok_or("Missing connection string for Redis")?;
@@ -220,7 +221,7 @@ impl DataLoader {
 
     // Load data from PostgreSQL
     fn load_from_postgres(&mut self, error_log_location: &str) -> Result<(), Box<dyn std::error::Error>> {
-
+        println!("{}", error_log_location);
         // Ensure columns configuration is available
         let columns = self.columns.as_ref()
             .ok_or("Error: Columns are required for structured datasets in PostgreSQL.")?;

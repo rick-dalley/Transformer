@@ -189,11 +189,15 @@ impl Matrix {
         for row in self.rows_iter() {
             let max_val = row.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
             let exp_sum: f64 = row.iter().map(|&x| (x - max_val).exp()).sum();
-            let log_softmax_row: Vec<f64> = row.iter().map(|&x| (x - max_val).exp().ln() - exp_sum.ln()).collect();
+            let log_sum_exp = exp_sum.ln();
+
+            let log_softmax_row: Vec<f64> = row.iter()
+                .map(|&x| (x - max_val) - log_sum_exp) 
+                .collect();
+
             log_softmax_data.extend(log_softmax_row);
         }
 
-        // Construct the matrix manually
         Matrix::new(self.rows, self.cols, log_softmax_data)
     }
 

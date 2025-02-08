@@ -59,6 +59,7 @@ pub struct Config {
     pub num_classes: usize,
     pub num_heads: usize,
     pub num_layers: usize,
+    pub hidden_layer_scaling: usize,
 
     #[serde(default = "default_label_index")]
     pub label_column_index: usize,

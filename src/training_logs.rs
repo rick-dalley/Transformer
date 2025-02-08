@@ -9,7 +9,7 @@ pub fn log_epoch_results(
     total_loss: f64,
     correct_predictions: usize,
     total_samples: usize,
-    weights: Matrix,
+    ff_output_weights: Matrix,
     loss_history: &mut Vec<f64>,
     accuracy_history: &mut Vec<f64>,
     training_data_rows: usize,
@@ -23,12 +23,15 @@ pub fn log_epoch_results(
     accuracy_history.push(accuracy);
 
     // Compute mean and std dev of final_output_weights directly inside this function
-    let weights_data = &weights.data;
-    let weight_mean = weights_data.iter().sum::<f64>() / weights_data.len() as f64;
-    let weight_std = (weights_data.iter().map(|w| (w - weight_mean).powi(2)).sum::<f64>() / weights_data.len() as f64).sqrt();
 
     // Log everything
-    log_training_metrics(epoch, avg_loss, accuracy, weight_mean, weight_std, log_location);
+    log_training_metrics(
+        epoch, 
+        avg_loss, 
+        accuracy, 
+        ff_output_weights.std_dev(),
+        ff_output_weights.mean(), 
+        log_location);
 }
 
 // log training metrics
@@ -36,8 +39,8 @@ pub fn log_training_metrics(
     epoch: usize, 
     loss: f64, 
     accuracy: f64, 
-    weight_mean: f64, 
-    weight_std: f64, 
+    ff_weight_std: f64,
+    ff_weight_mean: f64, 
     log_location: &str
 ) {
 
@@ -51,11 +54,11 @@ pub fn log_training_metrics(
         .expect("Failed to open log file");
 
     HEADER_PRINTED.call_once(|| {
-        writeln!(file, "epoch, avg_loss, accuracy, weight_mean, weight_std")
+        writeln!(file, "epoch, avg_loss, accuracy, final_output_weight_std, final_output_weight_mean, ff_output_weights_std, ff_output_weights_mean")
             .expect("Failed to write header.");
     });
     
-    writeln!(file, "{},{},{},{},{}", epoch, loss, accuracy, weight_mean, weight_std)
+    writeln!(file, "{}, {},{}, {}, {}", epoch, loss, accuracy,ff_weight_std, ff_weight_mean)
         .expect("Failed to write log.");
 }
 
