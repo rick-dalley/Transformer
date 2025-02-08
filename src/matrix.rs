@@ -201,6 +201,27 @@ impl Matrix {
         Matrix::new(self.rows, self.cols, log_softmax_data)
     }
 
+    // pub fn softmax(&self) -> Matrix {
+    //     let mut result_data = Vec::new();
+        
+    //     for row in 0..self.rows {
+    //         let start = row * self.cols;
+    //         let end = start + self.cols;
+    //         let row_slice = &self.data[start..end];
+
+    //         // Apply softmax directly without normalizing the logits
+    //         let processed_row = self.softmax_row(&row_slice);
+
+    //         result_data.extend_from_slice(&processed_row);
+    //     }
+
+    //     Matrix {
+    //         rows: self.rows,
+    //         cols: self.cols,
+    //         data: result_data,
+    //     }
+    // }
+
     pub fn softmax(&self) -> Matrix {
         let mut result_data = Vec::new();
         
@@ -233,7 +254,6 @@ impl Matrix {
             data: result_data,
         }
     }
-
 
     pub fn clamp_to(&mut self, min: f64, max: f64) {
         self.data.iter_mut().for_each(|x| *x = x.max(min).min(max));

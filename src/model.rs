@@ -439,11 +439,9 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
                     );             
                     self.ff_hidden_weights -= grad_ff_hidden_weights * self.learning_rate;
                     self.ff_hidden_bias -= grad_ff_hidden_bias * self.learning_rate;
-                    // self.ff_output_weights -= grad_ff_output_weights * self.learning_rate;
                     let clipped_ff_output_weights = Self::clip_gradients(&grad_ff_output_weights, self.clipping_strategy, self.clip_threshold);
                     self.ff_output_weights -= clipped_ff_output_weights * self.learning_rate;
                     self.ff_output_bias -=  grad_ff_output_bias * self.learning_rate;
-training_logs::log_matrix_stats(0, 0, grad_ff_output_weights.clone(), "./log_files/gradients.csv", "grad_ff_output_weights", false);
 
                 } else {
                     // Handle regression logic 
@@ -709,7 +707,7 @@ impl TaskTrait for ClassificationTaskImpl {
         attention_weights.dot(value)
     }
 
-   fn multi_head_attention<T>(
+    fn multi_head_attention<T>(
         &self, model: &Model<T>,
         query: &Matrix,
         key: &Matrix,
@@ -737,6 +735,25 @@ impl TaskTrait for ClassificationTaskImpl {
 
         Matrix::concat_heads(&attention_heads)
     }
+
+
+// fn transformer_layer<T>(&self, model: &Model<T>, input: &Matrix) -> Matrix
+// where
+//     T: TaskTrait + TrainTrait, 
+// {
+//     // Apply LayerNorm before residual sum (Pre-LayerNorm)
+//     let attention_residual = model.layer_norm(&input);  // Pre-LayerNorm applied here
+
+//     let attention_output = model.task.multi_head_attention(model, &attention_residual, &attention_residual, &attention_residual, model.num_heads, model.embed_dim);
+//     let residual_sum = attention_residual + attention_output; 
+
+//     let ff_residual = model.layer_norm(&residual_sum); // Apply LayerNorm after the residual sum
+
+//     let ff_output = model.task.feedforward_network(model, &ff_residual);
+//     let ff_residual_sum = ff_residual + ff_output; // Ensure residual connection
+    
+//     model.layer_norm(&ff_residual_sum)  // Apply final LayerNorm after the second residual connection
+// }
 
     fn transformer_layer<T>(&self, model: &Model<T>, input: &Matrix) -> Matrix
     where
