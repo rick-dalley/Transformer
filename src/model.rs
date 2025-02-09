@@ -337,6 +337,7 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
         }
     }
 
+    #[allow(dead_code)]
     pub fn update_weights(&mut self, gradients: &Matrix) {
 
         // Compute aggregated gradients, ensuring the batch dimension is reduced correctly
@@ -364,11 +365,29 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
         }
     }
 
+
+    #[allow(dead_code)]
+    pub fn compute_r_squared(&self, outputs: &Matrix, targets: &Matrix) -> f64 {
+        let mean_target = targets.mean();
+        let total_variance: f64 = targets
+            .rows_iter()
+            .map(|target| target.iter().map(|&x| (x - mean_target).powi(2)).sum::<f64>())
+            .sum();
+        
+        let residual_variance: f64 = outputs
+            .rows_iter()
+            .zip(targets.rows_iter())
+            .map(|(predicted, target)| {
+                predicted.iter().zip(target.iter()).map(|(p, t)| (p - t).powi(2)).sum::<f64>()
+            })
+            .sum();
+        
+        1.0 - residual_variance / total_variance
+    }
+
     pub fn train(&mut self) {
         // Track training time
         let start_time = Instant::now();
-        let mut loss_history: Vec<f64> = Vec::new();
-        let mut accuracy_history: Vec<f64> = Vec::new();
 
         // Progress bar setup
         let iterations: u64 = (self.epochs * (self.data_loader.training_data.rows / self.batch_size)) as u64;
@@ -381,8 +400,8 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
         // for the number of epochs asked for in config.json
         for epoch in 0..self.epochs {
             let mut total_loss = 0.0;
-            let mut correct_predictions = 0;
-            let mut total_samples = 0;
+            // let mut correct_predictions = 0;
+
             // Shuffle training data and labels
             DataLoader::shuffle_data(&mut self.data_loader.training_data, &mut self.data_loader.training_labels);
             let rows = self.data_loader.training_data.rows;
@@ -401,14 +420,12 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
                     data_loader::Labels::Regression(vec) => Matrix::new(vec.len(), 1, vec.clone()), // Use regression labels as is
                 };
 
-
                 let batch_loss = self.task.compute_loss(&outputs.clone(), &target_batch);
                 total_loss += batch_loss;
                 
                 let accuracy = self.task.compute_accuracy(&outputs, &batch_labels);
 
-                correct_predictions += (accuracy / 100.0 * batch_labels.len() as f64) as usize;
-                total_samples += batch_labels.len();
+                // correct_predictions += (accuracy / 100.0 * batch_labels.len() as f64) as usize;
 
                 // Backward pass
                 let output_errors = self.task.compute_output_errors(&outputs, &target_batch);
@@ -446,7 +463,7 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
                 } else {
                     // Handle regression logic 
                     let (
-                        attention_gradient, 
+                        _attention_gradient, 
                         grad_hidden_weights,
                         grad_ff_hidden_bias,
                         grad_ff_output_weights,
@@ -462,29 +479,29 @@ impl<'a, T: TaskTrait + TrainTrait> Model<'a, T> {
                     
                     self.ff_hidden_weights -= grad_hidden_weights * self.learning_rate;
                     self.ff_hidden_bias -= grad_ff_hidden_bias * self.learning_rate;
-                    self.ff_output_weights -= grad_ff_output_weights * self.learning_rate;
+                    let clipped_ff_output_weights = Self::clip_gradients(&grad_ff_output_weights, self.clipping_strategy, self.clip_threshold);
+                    self.ff_output_weights -= clipped_ff_output_weights * self.learning_rate;
                     self.ff_output_bias -=  grad_ff_output_bias * self.learning_rate;
-                    self.update_weights( &attention_gradient);
+                    // self.update_weights( &attention_gradient);
                 }
 
+
+                // let accuracy = correct_predictions;
                 // Record the results of the run
-                training_logs::log_epoch_results(
-                    "log_files/training_log.csv",
+                training_logs::log_training_metrics(
                     epoch,
-                    total_loss,
-                    correct_predictions,
-                    total_samples,
-                    self.ff_output_weights.clone(),
-                    &mut loss_history,
-                    &mut accuracy_history,
-                    rows,
+                    batch_loss,
+                    accuracy,
+                    self.ff_output_weights.std_dev(),
+                    self.ff_output_weights.mean(),
+                    "log_files/training_log.csv",
+                    true
                 );
 
                 // Update progress bar
                 pb.inc(1);
             } // batch
 
- 
            println!("Epoch {}/{} - Loss: {:.4}", epoch + 1, self.epochs, total_loss / rows as f64);
 
             // Perform periodic checkpointing
@@ -1208,15 +1225,18 @@ impl TrainTrait for ClassificationTaskImpl {
 
         let correct_count: usize = outputs
             .rows_iter()
-            .zip(classification_labels.iter()) // Use extracted `Vec<usize>`
-            .filter(|(predicted, &true_label)| Matrix::argmax_row(*predicted) == true_label)
+            .zip(classification_labels.iter()) // Iterate through outputs and true labels
+            .filter(|(predicted, &true_label)| {
+                let predicted_class = Matrix::argmax_row(predicted); // Get index of predicted class
+                predicted_class == true_label // Compare with true label's index
+            })
             .count();
 
         if classification_labels.is_empty() {
             return 0.0; // Prevent division by zero
         }
 
-        (correct_count as f64 / classification_labels.len() as f64) * 100.0 
+        (correct_count as f64 / classification_labels.len() as f64) * 100.0
     }
 
     fn compute_final_output<T>(&self, model: &Model<T>, input: &Matrix) -> Matrix
@@ -1232,15 +1252,17 @@ impl TrainTrait for ClassificationTaskImpl {
 }
 
 impl TrainTrait for RegressionTaskImpl {
+
     fn compute_loss(&self, outputs: &Matrix, targets: &Matrix) -> f64 {
         // Mean squared error for regression
+        let batch_size = outputs.rows as f64;
         outputs
             .rows_iter()
             .zip(targets.rows_iter())
             .map(|(predicted, target)| {
                 predicted.iter().zip(target.iter()).map(|(p, t)| (p - t).powi(2)).sum::<f64>()
             })
-            .sum::<f64>()
+            .sum::<f64>() / batch_size
     }
 
     fn compute_output_errors(&self, outputs: &Matrix, targets: &Matrix) -> Matrix {

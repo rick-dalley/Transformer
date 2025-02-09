@@ -3,47 +3,20 @@ use std::fs::OpenOptions;
 use std::sync::Once;
 use crate::matrix::Matrix;
 
-pub fn log_epoch_results(
-    log_location: &str,
-    epoch: usize,
-    total_loss: f64,
-    correct_predictions: usize,
-    total_samples: usize,
-    ff_output_weights: Matrix,
-    loss_history: &mut Vec<f64>,
-    accuracy_history: &mut Vec<f64>,
-    training_data_rows: usize,
-) {
-    // Compute average loss and accuracy
-    let avg_loss = total_loss / training_data_rows as f64;
-    let accuracy = (correct_predictions as f64 / total_samples as f64) * 100.0;
-
-    // Store values for analysis
-    loss_history.push(avg_loss);
-    accuracy_history.push(accuracy);
-
-    // Compute mean and std dev of final_output_weights directly inside this function
-
-    // Log everything
-    log_training_metrics(
-        epoch, 
-        avg_loss, 
-        accuracy, 
-        ff_output_weights.std_dev(),
-        ff_output_weights.mean(), 
-        log_location);
-}
-
 // log training metrics
 pub fn log_training_metrics(
     epoch: usize, 
     loss: f64, 
     accuracy: f64, 
-    ff_weight_std: f64,
-    ff_weight_mean: f64, 
-    log_location: &str
+    std: f64,
+    mean: f64,
+    log_location: &str,
+    squelch: bool
 ) {
 
+    if squelch {
+        return;
+    }
     static HEADER_PRINTED: Once = Once::new();
     
     // Create or open the log file to append
@@ -57,9 +30,10 @@ pub fn log_training_metrics(
         writeln!(file, "epoch, avg_loss, accuracy, final_output_weight_std, final_output_weight_mean, ff_output_weights_std, ff_output_weights_mean")
             .expect("Failed to write header.");
     });
-    
-    writeln!(file, "{}, {},{}, {}, {}", epoch, loss, accuracy,ff_weight_std, ff_weight_mean)
+
+    writeln!(file, "{}, {},{}, {}, {}", epoch, loss, accuracy, std, mean)
         .expect("Failed to write log.");
+
 }
 
 pub fn log_matrix_norms(epoch:usize, iteration:usize, matrix: Matrix, log_location:&str){
